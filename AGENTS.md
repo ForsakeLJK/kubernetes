@@ -36,3 +36,13 @@ make update                                 # ALL generators and formatters
 ## Style
 
 - Packages: lowercase, single word, match directory.
+
+## Agent skills
+
+### Issue tracker
+
+Issues and specs live as local markdown files under `.scratch/`. See `docs/agents/issue-tracker.md`.
+
+### Domain docs
+
+Single-context layout: `CONTEXT.md` and `docs/adr/` at the repo root. See `docs/agents/domain.md`.

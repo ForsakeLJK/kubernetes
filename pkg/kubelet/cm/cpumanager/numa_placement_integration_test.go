@@ -139,3 +139,133 @@ func TestNUMAPlacementRefusesRestoredCPUAssignment(t *testing.T) {
 		t.Fatalf("restored CPUs were modified: %s", actual)
 	}
 }
+
+func TestNUMAPlacementPodWideAccounting(t *testing.T) {
+	logger, ctx := ktesting.NewTestContext(t)
+	for _, tc := range []struct {
+		name          string
+		initCPUs      []string
+		appCPUs       []string
+		sidecar       bool
+		memoryGiB     uint64
+		wantCPUs      int
+		wantMemoryGiB uint64
+		admit         bool
+	}{
+		{name: "concurrent applications", appCPUs: []string{"1", "1"}, wantCPUs: 2, wantMemoryGiB: 2, admit: true},
+		{name: "sequential init reuse", initCPUs: []string{"2", "2"}, appCPUs: []string{"1", "1"}, wantCPUs: 2, wantMemoryGiB: 2, admit: true},
+		{name: "sidecar overlaps later init and applications", initCPUs: []string{"2", "2"}, appCPUs: []string{"1", "1"}, sidecar: true, wantCPUs: 3, wantMemoryGiB: 3, admit: true},
+		{name: "combined applications exceed requested node", appCPUs: []string{"4", "4"}},
+		{name: "combined memory exceeds requested node", appCPUs: []string{"1", "1", "1"}, memoryGiB: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			scope := topologymanager.NewPodScope(topologymanager.NewSingleNumaNodePolicy(&topologymanager.NUMAInfo{Nodes: []int{0, 1}}, topologymanager.PolicyOptions{}))
+			cpuPolicy, err := NewStaticPolicy(logger, topoDualSocketHT, 1, cpuset.New(), scope, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			initialCPUs := cpuset.New(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11)
+			cpuState := &mockState{assignments: cpustate.ContainerCPUAssignments{}, defaultCPUSet: initialCPUs, baselines: cpustate.ContainerCPUBaselines{}}
+			memoryPolicy, err := memorymanager.NewPolicyStatic(logger, nil, map[int]map[v1.ResourceName]uint64{0: {v1.ResourceMemory: 512 * 1024 * 1024}}, scope)
+			if err != nil {
+				t.Fatal(err)
+			}
+			memoryState := memorystate.NewMemoryState(logger)
+			const gib = uint64(1024 * 1024 * 1024)
+			requestedNodeMemory := uint64(4) * gib
+			if tc.memoryGiB != 0 {
+				requestedNodeMemory = tc.memoryGiB * gib
+			}
+			memoryState.SetMachineState(memorystate.NUMANodeMap{
+				0: {MemoryMap: map[v1.ResourceName]*memorystate.MemoryTable{v1.ResourceMemory: {TotalMemSize: 4 * gib, Allocatable: 4 * gib, Free: 4 * gib}}},
+				1: {MemoryMap: map[v1.ResourceName]*memorystate.MemoryTable{v1.ResourceMemory: {TotalMemSize: requestedNodeMemory, Allocatable: requestedNodeMemory, Free: requestedNodeMemory}}},
+			})
+			scope.AddHintProvider(logger, &placementCPUProvider{policy: cpuPolicy, state: cpuState})
+			scope.AddHintProvider(logger, &placementMemoryProvider{policy: memoryPolicy, state: memoryState})
+			pod := makePod("pod-wide-"+tc.name, "app-0", tc.appCPUs[0], tc.appCPUs[0])
+			node := int32(1)
+			pod.Spec.NUMANode = &node
+			for i, amount := range tc.appCPUs[1:] {
+				container := makePod("unused", "app-"+string(rune('1'+i)), amount, amount).Spec.Containers[0]
+				pod.Spec.Containers = append(pod.Spec.Containers, container)
+			}
+			for i, amount := range tc.initCPUs {
+				container := makePod("unused", "init-"+string(rune('0'+i)), amount, amount).Spec.Containers[0]
+				pod.Spec.InitContainers = append(pod.Spec.InitContainers, container)
+			}
+			if tc.sidecar {
+				restart := v1.ContainerRestartPolicyAlways
+				pod.Spec.InitContainers[0].RestartPolicy = &restart
+				pod.Spec.InitContainers[0].Resources.Requests[v1.ResourceCPU] = pod.Spec.Containers[0].Resources.Requests[v1.ResourceCPU]
+				pod.Spec.InitContainers[0].Resources.Limits[v1.ResourceCPU] = pod.Spec.Containers[0].Resources.Limits[v1.ResourceCPU]
+			}
+			result := scope.Admit(ctx, pod, lifecycle.AddOperation)
+			if result.Admit != tc.admit {
+				t.Fatalf("admission = %+v, want admit %t", result, tc.admit)
+			}
+			if !tc.admit {
+				if !cpuState.GetDefaultCPUSet().Equals(initialCPUs) {
+					t.Fatalf("CPU state changed after capacity refusal: %s", cpuState.GetDefaultCPUSet())
+				}
+				return
+			}
+			for _, container := range append(pod.Spec.InitContainers, pod.Spec.Containers...) {
+				cpus, ok := cpuState.GetCPUSet(string(pod.UID), container.Name)
+				if !ok || cpus.IsEmpty() || !cpus.IsSubsetOf(topoDualSocketHT.CPUDetails.CPUsInNUMANodes(1)) {
+					t.Fatalf("%s CPUs = %s, want requested node", container.Name, cpus)
+				}
+				blocks := memoryState.GetMemoryBlocks(string(pod.UID), container.Name)
+				if len(blocks) != 1 || len(blocks[0].NUMAAffinity) != 1 || blocks[0].NUMAAffinity[0] != 1 {
+					t.Fatalf("%s memory blocks = %+v, want requested node", container.Name, blocks)
+				}
+			}
+			if used := initialCPUs.Difference(cpuState.GetDefaultCPUSet()).Size(); used != tc.wantCPUs {
+				t.Fatalf("reserved CPUs = %d, want %d", used, tc.wantCPUs)
+			}
+			if free := memoryState.GetMachineState()[1].MemoryMap[v1.ResourceMemory].Free; free != requestedNodeMemory-tc.wantMemoryGiB*1000*1000*1000 {
+				t.Fatalf("free memory = %d, want %d", free, requestedNodeMemory-tc.wantMemoryGiB*1000*1000*1000)
+			}
+			for _, container := range append(pod.Spec.InitContainers, pod.Spec.Containers...) {
+				if err := cpuPolicy.RemoveContainer(logger, cpuState, string(pod.UID), container.Name); err != nil {
+					t.Fatal(err)
+				}
+				memoryPolicy.RemoveContainer(logger, memoryState, string(pod.UID), container.Name)
+			}
+			if !cpuState.GetDefaultCPUSet().Equals(initialCPUs) || len(memoryState.GetMemoryAssignments()[string(pod.UID)]) != 0 || memoryState.GetMachineState()[1].MemoryMap[v1.ResourceMemory].Free != requestedNodeMemory {
+				t.Fatalf("normal cleanup retained allocations: CPUs=%s memory=%v node=%+v", cpuState.GetDefaultCPUSet(), memoryState.GetMemoryAssignments()[string(pod.UID)], memoryState.GetMachineState()[1])
+			}
+		})
+	}
+}
+
+func TestNUMAPlacementRollbackPreservesOtherPodCPUs(t *testing.T) {
+	logger, _ := ktesting.NewTestContext(t)
+	node := int32(1)
+	pod := makePod("rollback", "app", "1", "1")
+	pod.Spec.NUMANode = &node
+	pod.Spec.InitContainers = []v1.Container{{Name: "init"}}
+	defaultCPUs := cpuset.New(0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11)
+	state := &mockState{assignments: cpustate.ContainerCPUAssignments{string(pod.UID): {"init": cpuset.New(1)}}, defaultCPUSet: defaultCPUs, baselines: cpustate.ContainerCPUBaselines{}}
+	policy, err := NewStaticPolicy(logger, topoDualSocketHT, 1, cpuset.New(), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := &manager{state: state, policy: policy, numaPlacementAllocations: map[string]bool{numaPlacementKey(pod, &pod.Spec.InitContainers[0]): true}}
+	rollback := m.SnapshotNUMAPlacement(pod, &pod.Spec.Containers[0])
+	state.SetCPUSet(string(pod.UID), "app", cpuset.New(5))
+	state.SetCPUSet("other-pod", "app", cpuset.New(3))
+	state.SetDefaultCPUSet(defaultCPUs.Difference(cpuset.New(3, 5)))
+	m.numaPlacementAllocations[numaPlacementKey(pod, &pod.Spec.Containers[0])] = true
+	if err := rollback(logger); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := state.GetCPUSet(string(pod.UID), "app"); exists {
+		t.Fatal("new application assignment remained committed")
+	}
+	if actual, exists := state.GetCPUSet("other-pod", "app"); !exists || !actual.Equals(cpuset.New(3)) {
+		t.Fatalf("other pod assignment changed: %s", actual)
+	}
+	if !state.GetDefaultCPUSet().Equals(defaultCPUs.Difference(cpuset.New(3))) {
+		t.Fatalf("default CPU set = %s, want other pod CPU retained", state.GetDefaultCPUSet())
+	}
+}

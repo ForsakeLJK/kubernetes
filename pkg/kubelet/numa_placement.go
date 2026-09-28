@@ -70,7 +70,7 @@ func (h *numaPlacementAdmitHandler) Admit(_ context.Context, attrs *lifecycle.Po
 			}
 			return lifecycle.PodAdmitResult{
 				Reason:  "NUMAPlacementNotImplemented",
-				Message: fmt.Sprintf("NUMA node %d: explicit placement for multiple containers, init containers, or hugepages is not yet supported", id),
+				Message: fmt.Sprintf("NUMA node %d: explicit placement for hugepages is not yet supported", id),
 			}
 		}
 	}
@@ -81,17 +81,19 @@ func (h *numaPlacementAdmitHandler) Admit(_ context.Context, attrs *lifecycle.Po
 }
 
 func supportedNUMAPlacementPod(pod *v1.Pod) bool {
-	if len(pod.Spec.Containers) != 1 || len(pod.Spec.InitContainers) != 0 {
+	if len(pod.Spec.Containers) == 0 {
 		return false
 	}
-	for resourceName := range pod.Spec.Containers[0].Resources.Requests {
-		if v1helper.IsHugePageResourceName(resourceName) {
-			return false
+	for _, container := range append(pod.Spec.InitContainers, pod.Spec.Containers...) {
+		for resourceName := range container.Resources.Requests {
+			if v1helper.IsHugePageResourceName(resourceName) {
+				return false
+			}
 		}
-	}
-	for resourceName := range pod.Spec.Containers[0].Resources.Limits {
-		if v1helper.IsHugePageResourceName(resourceName) {
-			return false
+		for resourceName := range container.Resources.Limits {
+			if v1helper.IsHugePageResourceName(resourceName) {
+				return false
+			}
 		}
 	}
 	return true

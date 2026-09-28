@@ -509,7 +509,7 @@ func (p *staticPolicy) Allocate(ctx context.Context, s state.State, pod *v1.Pod,
 		}
 		for resourceName, size := range requestedResources {
 			memory := node.MemoryMap[resourceName]
-			if memory == nil || memory.Free < size {
+			if memory == nil || (size > memory.Free && size-memory.Free > p.getPodReusableMemory(pod, requested, resourceName)) {
 				return fmt.Errorf("insufficient %s on requested NUMA node %d: need %d bytes", resourceName, *pod.Spec.NUMANode, size)
 			}
 		}

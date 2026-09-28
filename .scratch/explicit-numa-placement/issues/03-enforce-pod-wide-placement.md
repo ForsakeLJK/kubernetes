@@ -4,7 +4,7 @@
 
 **Blocked by:** 02 — Enforce CPU and memory placement for a single-container Pod.
 
-**Status:** ready-for-agent
+**Status:** claimed
 
 **Type:** task
 

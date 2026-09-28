@@ -938,16 +938,22 @@ func (p *staticPolicy) allocateForAdd(logger klog.Logger, s state.State, pod *v1
 		if hint.NUMANodeAffinity == nil || !hint.NUMANodeAffinity.IsEqual(requested) {
 			return fmt.Errorf("CPU topology affinity does not select requested NUMA node %d", *pod.Spec.NUMANode)
 		}
-		available := p.GetAvailableCPUs(s).Union(p.cpusToReuse[string(pod.UID)]).Intersection(p.topology.CPUDetails.CPUsInNUMANodes(int(*pod.Spec.NUMANode)))
+		nodeCPUs := p.topology.CPUDetails.CPUsInNUMANodes(int(*pod.Spec.NUMANode))
+		reusable := p.cpusToReuse[string(pod.UID)].Intersection(nodeCPUs)
+		available := p.GetAvailableCPUs(s).Intersection(nodeCPUs).Union(reusable)
 		if available.Size() < numCPUs {
 			return fmt.Errorf("insufficient eligible CPUs on requested NUMA node %d: need %d, have %d", *pod.Spec.NUMANode, numCPUs, available.Size())
 		}
-		allocation, err := p.takeByTopology(logger, available, numCPUs, 1)
+		allocation, err := p.takeByTopology(logger, reusable, numCPUs, 1)
+		if err != nil {
+			allocation, err = p.takeByTopology(logger, available, numCPUs, 1)
+		}
 		if err != nil {
 			return fmt.Errorf("cannot allocate %d CPUs on requested NUMA node %d: %w", numCPUs, *pod.Spec.NUMANode, err)
 		}
 		s.SetDefaultCPUSet(s.GetDefaultCPUSet().Difference(allocation))
 		s.SetCPUSet(string(pod.UID), container.Name, allocation)
+		p.updateCPUsToReuse(pod, container, allocation)
 		p.updateMetricsFromState(logger, s)
 		return nil
 	}

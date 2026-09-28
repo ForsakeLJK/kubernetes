@@ -32,26 +32,59 @@ import (
 type numaPlacementTestProvider struct {
 	mockHintProvider
 	allocateError error
+	failContainer string
 	allocated     bool
 	released      bool
+	assignments   map[string]bool
 }
 
-func (p *numaPlacementTestProvider) Allocate(_ context.Context, _ *v1.Pod, _ *v1.Container, _ lifecycle.Operation) error {
-	if p.allocateError != nil {
+func (p *numaPlacementTestProvider) Allocate(_ context.Context, _ *v1.Pod, container *v1.Container, _ lifecycle.Operation) error {
+	if p.allocateError != nil && (p.failContainer == "" || p.failContainer == container.Name) {
 		return p.allocateError
 	}
 	p.allocated = true
+	if p.assignments != nil {
+		p.assignments[container.Name] = true
+	}
 	return nil
 }
 
-func (p *numaPlacementTestProvider) ReleaseNUMAPlacement(_ klog.Logger, _ *v1.Pod, _ *v1.Container) error {
+func (p *numaPlacementTestProvider) ReleaseNUMAPlacement(_ klog.Logger, _ *v1.Pod, container *v1.Container) error {
 	p.released = true
 	p.allocated = false
+	delete(p.assignments, container.Name)
 	return nil
 }
 
-func (p *numaPlacementTestProvider) NUMAPlacementAllocated(_ *v1.Pod, _ *v1.Container) bool {
+func (p *numaPlacementTestProvider) NUMAPlacementAllocated(_ *v1.Pod, container *v1.Container) bool {
+	if p.assignments != nil {
+		return p.assignments[container.Name]
+	}
 	return p.allocated
+}
+
+func TestRequestedNUMAPlacementRollsBackWholePod(t *testing.T) {
+	logger, ctx := ktesting.NewTestContext(t)
+	info := &NUMAInfo{Nodes: []int{0, 2}, NUMADistances: NUMADistances{0: {10, 20}, 2: {20, 10}}}
+	node := int32(2)
+	pod := &v1.Pod{Spec: v1.PodSpec{NUMANode: &node, InitContainers: []v1.Container{{Name: "init"}}, Containers: []v1.Container{{Name: "app-a"}, {Name: "app-b"}}}}
+	hints := map[string][]TopologyHint{"cpu": {{NUMANodeAffinity: NewTestBitMask(2), Preferred: true}}}
+	for _, fail := range []string{"init", "app-a", "app-b"} {
+		t.Run(fail, func(t *testing.T) {
+			first := &numaPlacementTestProvider{mockHintProvider: mockHintProvider{th: hints}, assignments: map[string]bool{"init": true}}
+			second := &numaPlacementTestProvider{mockHintProvider: mockHintProvider{th: hints}, assignments: map[string]bool{}, failContainer: fail, allocateError: errors.New("injected allocation failure")}
+			s := NewPodScope(NewSingleNumaNodePolicy(info, PolicyOptions{})).(*podScope)
+			s.AddHintProvider(logger, first)
+			s.AddHintProvider(logger, second)
+			result := s.Admit(ctx, pod, lifecycle.AddOperation)
+			if result.Admit || !strings.Contains(result.Message, "injected allocation failure") {
+				t.Fatalf("admission = %+v, want injected failure", result)
+			}
+			if !reflect.DeepEqual(first.assignments, map[string]bool{"init": true}) || len(second.assignments) != 0 {
+				t.Fatalf("partial allocation retained: first=%v second=%v", first.assignments, second.assignments)
+			}
+		})
+	}
 }
 
 func TestRequestedNUMAPlacement(t *testing.T) {

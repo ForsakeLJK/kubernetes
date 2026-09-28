@@ -23,6 +23,7 @@ import (
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/klog/v2"
 	"k8s.io/kubernetes/pkg/kubelet/cm/memorymanager/state"
 	"k8s.io/kubernetes/test/utils/ktesting"
 )
@@ -47,5 +48,43 @@ func TestNUMAPlacementRefusesRestoredMemoryAssignment(t *testing.T) {
 	}
 	if actual := memoryState.GetMemoryBlocks(string(pod.UID), container.Name); len(actual) != 1 || actual[0].NUMAAffinity[0] != 2 {
 		t.Fatalf("restored memory assignment was modified: %+v", actual)
+	}
+}
+
+func TestNUMAPlacementRollbackRestoresInitReuse(t *testing.T) {
+	logger, _ := ktesting.NewTestContext(t)
+	node := int32(2)
+	pod := &v1.Pod{ObjectMeta: metav1.ObjectMeta{UID: types.UID("rollback-pod")}, Spec: v1.PodSpec{
+		NUMANode: &node, InitContainers: []v1.Container{{Name: "init"}}, Containers: []v1.Container{{Name: "app"}},
+	}}
+	const gib = uint64(1024 * 1024 * 1024)
+	memoryState := state.NewMemoryState(logger)
+	memoryState.SetMachineState(state.NUMANodeMap{2: {MemoryMap: map[v1.ResourceName]*state.MemoryTable{v1.ResourceMemory: {TotalMemSize: 2 * gib, Allocatable: 2 * gib, Free: gib, Reserved: gib}}, NumberOfAssignments: 1}})
+	memoryState.SetMemoryBlocks(string(pod.UID), "init", []state.Block{{NUMAAffinity: []int{2}, Type: v1.ResourceMemory, Size: gib}})
+	policy := &staticPolicy{initContainersReusableMemory: map[string]map[string]map[v1.ResourceName]uint64{string(pod.UID): {"2": {v1.ResourceMemory: gib}}}}
+	m := &manager{state: memoryState, policy: policy, numaPlacementAllocations: map[string]bool{numaPlacementKey(pod, &pod.Spec.InitContainers[0]): true}}
+	rollback := m.SnapshotNUMAPlacement(pod, &pod.Spec.Containers[0])
+	memoryState.SetMachineState(state.NUMANodeMap{2: {MemoryMap: map[v1.ResourceName]*state.MemoryTable{v1.ResourceMemory: {TotalMemSize: 2 * gib, Allocatable: 2 * gib, Free: 0, Reserved: 2 * gib}}, NumberOfAssignments: 2}})
+	memoryState.SetMemoryBlocks(string(pod.UID), "init", []state.Block{{NUMAAffinity: []int{2}, Type: v1.ResourceMemory, Size: 0}})
+	memoryState.SetMemoryBlocks(string(pod.UID), "app", []state.Block{{NUMAAffinity: []int{2}, Type: v1.ResourceMemory, Size: 2 * gib}})
+	policy.initContainersReusableMemory[string(pod.UID)]["2"][v1.ResourceMemory] = 0
+	m.numaPlacementAllocations[numaPlacementKey(pod, &pod.Spec.Containers[0])] = true
+	if err := rollback(klog.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if blocks := memoryState.GetMemoryBlocks(string(pod.UID), "init"); len(blocks) != 1 || blocks[0].Size != gib {
+		t.Fatalf("init assignment was not restored: %+v", blocks)
+	}
+	if blocks := memoryState.GetMemoryBlocks(string(pod.UID), "app"); blocks != nil {
+		t.Fatalf("new application assignment retained: %+v", blocks)
+	}
+	if nodeState := memoryState.GetMachineState()[2]; nodeState.MemoryMap[v1.ResourceMemory].Free != gib || nodeState.NumberOfAssignments != 1 {
+		t.Fatalf("node accounting was not restored: %+v", nodeState)
+	}
+	if got := policy.initContainersReusableMemory[string(pod.UID)]["2"][v1.ResourceMemory]; got != gib {
+		t.Fatalf("reusable memory = %d, want %d", got, gib)
+	}
+	if m.numaPlacementAllocations[numaPlacementKey(pod, &pod.Spec.Containers[0])] {
+		t.Fatal("new application allocation remained committed")
 	}
 }

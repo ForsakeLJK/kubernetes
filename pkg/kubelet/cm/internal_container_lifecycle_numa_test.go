@@ -82,3 +82,26 @@ func TestExplicitNUMARuntimeMasks(t *testing.T) {
 		})
 	}
 }
+
+func TestExplicitNUMARuntimeMasksForEveryPodContainer(t *testing.T) {
+	node := int32(2)
+	restart := v1.ContainerRestartPolicyAlways
+	pod := &v1.Pod{Spec: v1.PodSpec{
+		NUMANode: &node,
+		InitContainers: []v1.Container{
+			{Name: "init"},
+			{Name: "sidecar", RestartPolicy: &restart},
+		},
+		Containers: []v1.Container{{Name: "app-a"}, {Name: "app-b"}},
+	}}
+	lifecycle := &internalContainerLifecycleImpl{cpuManager: numaRuntimeCPU{}, memoryManager: numaRuntimeMemory{}}
+	for _, container := range append(pod.Spec.InitContainers, pod.Spec.Containers...) {
+		config := &runtimeapi.ContainerConfig{Linux: &runtimeapi.LinuxContainerConfig{Resources: &runtimeapi.LinuxContainerResources{}}}
+		if err := lifecycle.PreCreateContainer(klog.Background(), pod, &container, config); err != nil {
+			t.Fatalf("%s: %v", container.Name, err)
+		}
+		if config.Linux.Resources.CpusetCpus != "4,6" || config.Linux.Resources.CpusetMems != "2" {
+			t.Fatalf("%s runtime masks = CPUs %q, memory %q", container.Name, config.Linux.Resources.CpusetCpus, config.Linux.Resources.CpusetMems)
+		}
+	}
+}

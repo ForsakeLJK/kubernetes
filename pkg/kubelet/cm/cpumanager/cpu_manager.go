@@ -320,6 +320,53 @@ func (m *manager) NUMAPlacementAllocated(pod *v1.Pod, container *v1.Container) b
 	return m.numaPlacementAllocations[numaPlacementKey(pod, container)]
 }
 
+// SnapshotNUMAPlacement restores CPU assignment and init-container reuse if
+// this pod admission attempt fails after allocation begins.
+func (m *manager) SnapshotNUMAPlacement(pod *v1.Pod, container *v1.Container) func(klog.Logger) error {
+	m.Lock()
+	defer m.Unlock()
+	podUID := string(pod.UID)
+	name := container.Name
+	key := numaPlacementKey(pod, container)
+	assigned, existed := m.state.GetCPUSet(podUID, name)
+	alreadyOwned := cpuset.New()
+	for _, cpus := range m.state.GetCPUAssignments()[podUID] {
+		alreadyOwned = alreadyOwned.Union(cpus)
+	}
+	reusable, hadReusable := cpuset.New(), false
+	if policy, ok := m.policy.(*staticPolicy); ok {
+		reusable, hadReusable = policy.cpusToReuse[podUID]
+	}
+	allocated := m.numaPlacementAllocations[key]
+	return func(klog.Logger) error {
+		m.Lock()
+		defer m.Unlock()
+		current, currentExists := m.state.GetCPUSet(podUID, name)
+		if currentExists {
+			m.state.SetDefaultCPUSet(m.state.GetDefaultCPUSet().Union(current.Difference(alreadyOwned)))
+		}
+		if existed {
+			m.state.SetCPUSet(podUID, name, assigned)
+		} else {
+			m.state.Delete(podUID, name)
+		}
+		if policy, ok := m.policy.(*staticPolicy); ok {
+			if hadReusable {
+				policy.cpusToReuse[podUID] = reusable
+			} else {
+				delete(policy.cpusToReuse, podUID)
+			}
+			policy.updateMetricsFromState(klog.Background(), m.state)
+		}
+		if allocated {
+			m.numaPlacementAllocations[key] = true
+		} else {
+			delete(m.numaPlacementAllocations, key)
+		}
+		return nil
+	}
+}
+
 func (m *manager) ValidateNUMAPlacement(pod *v1.Pod, container *v1.Container) error {
 	m.Lock()
 	defer m.Unlock()

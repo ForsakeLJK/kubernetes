@@ -108,8 +108,9 @@ func TestNUMAPlacementUnsupportedWorkloads(t *testing.T) {
 			pod := &v1.Pod{Spec: tc.spec}
 			pod.Spec.NUMANode = numaTestID(0)
 			result := h.Admit(context.Background(), &lifecycle.PodAdmitAttributes{Pod: pod})
-			if result.Admit || result.Reason != "NUMAPlacementNotImplemented" {
-				t.Fatalf("unsupported workload was admitted: %+v", result)
+			wantAdmit := tc.name != "hugepages"
+			if result.Admit != wantAdmit || !wantAdmit && result.Reason != "NUMAPlacementNotImplemented" {
+				t.Fatalf("workload admission = %+v, want admit %t", result, wantAdmit)
 			}
 		})
 	}

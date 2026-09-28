@@ -70,12 +70,14 @@ func (s *podScope) admitUsingContainerResources(ctx context.Context, pod *v1.Pod
 		if operation != lifecycle.AddOperation {
 			return admission.GetPodAdmitResult(numaPlacementError{fmt.Sprintf("NUMA node %d supports only new container allocation", *pod.Spec.NUMANode)})
 		}
-		for _, provider := range s.hintProviders {
-			if checker, ok := provider.(interface {
-				CheckNUMAPlacement(*v1.Pod, *v1.Container) error
-			}); ok {
-				if err := checker.CheckNUMAPlacement(pod, &pod.Spec.Containers[0]); err != nil {
-					return admission.GetPodAdmitResult(numaPlacementError{err.Error()})
+		for _, container := range append(pod.Spec.InitContainers, pod.Spec.Containers...) {
+			for _, provider := range s.hintProviders {
+				if checker, ok := provider.(interface {
+					CheckNUMAPlacement(*v1.Pod, *v1.Container) error
+				}); ok {
+					if err := checker.CheckNUMAPlacement(pod, &container); err != nil {
+						return admission.GetPodAdmitResult(numaPlacementError{err.Error()})
+					}
 				}
 			}
 		}
@@ -92,17 +94,25 @@ func (s *podScope) admitUsingContainerResources(ctx context.Context, pod *v1.Pod
 		return admission.GetPodAdmitResult(NewTopologyAffinityError())
 	}
 
+	var acquired []func() error
 	for _, container := range append(pod.Spec.InitContainers, pod.Spec.Containers...) {
 		logger.Info("Topology Affinity", "bestHint", bestHint, "pod", klog.KObj(pod), "containerName", container.Name)
 		s.setTopologyHints(string(pod.UID), container.Name, bestHint)
 
 		var err error
 		if pod.Spec.NUMANode != nil {
-			err = s.allocateRequestedResources(ctx, pod, &container, operation)
+			var current []func() error
+			current, err = s.allocateRequestedResources(ctx, pod, &container, operation)
+			acquired = append(acquired, current...)
 		} else {
 			err = s.allocateAlignedResources(ctx, pod, &container, operation)
 		}
 		if err != nil {
+			for i := len(acquired) - 1; i >= 0; i-- {
+				if releaseErr := acquired[i](); releaseErr != nil {
+					logger.Error(releaseErr, "Failed to release NUMA allocation after admission failure", "pod", klog.KObj(pod))
+				}
+			}
 			metrics.TopologyManagerAdmissionErrorsTotal.Inc()
 			return admission.GetPodAdmitResult(err)
 		}
@@ -163,19 +173,20 @@ func (s *podScope) requestedAffinity(logger klog.Logger, pod *v1.Pod, operation 
 	return TopologyHint{NUMANodeAffinity: mask, Preferred: true}, nil
 }
 
-func (s *podScope) allocateRequestedResources(ctx context.Context, pod *v1.Pod, container *v1.Container, operation lifecycle.Operation) error {
+func (s *podScope) allocateRequestedResources(ctx context.Context, pod *v1.Pod, container *v1.Container, operation lifecycle.Operation) ([]func() error, error) {
 	logger := klog.FromContext(ctx)
 	var acquired []func() error
 	for _, provider := range s.hintProviders {
-		if snapshotter, ok := provider.(interface {
+		snapshotter, hasSnapshot := provider.(interface {
 			SnapshotNUMAPlacement(*v1.Pod, *v1.Container) func(klog.Logger) error
-		}); ok {
+		})
+		if hasSnapshot {
 			rollback := snapshotter.SnapshotNUMAPlacement(pod, container)
 			acquired = append(acquired, func() error { return rollback(logger) })
 		}
 		if releaser, ok := provider.(interface {
 			ReleaseNUMAPlacement(klog.Logger, *v1.Pod, *v1.Container) error
-		}); ok {
+		}); ok && !hasSnapshot {
 			if checker, ok := provider.(interface {
 				NUMAPlacementAllocated(*v1.Pod, *v1.Container) bool
 			}); !ok || !checker.NUMAPlacementAllocated(pod, container) {
@@ -183,15 +194,10 @@ func (s *podScope) allocateRequestedResources(ctx context.Context, pod *v1.Pod, 
 			}
 		}
 		if err := provider.Allocate(ctx, pod, container, operation); err != nil {
-			for i := len(acquired) - 1; i >= 0; i-- {
-				if releaseErr := acquired[i](); releaseErr != nil {
-					logger.Error(releaseErr, "Failed to release NUMA allocation after admission failure", "pod", klog.KObj(pod))
-				}
-			}
-			return numaPlacementError{fmt.Sprintf("NUMA node %d: %v", *pod.Spec.NUMANode, err)}
+			return acquired, numaPlacementError{fmt.Sprintf("NUMA node %d: %v", *pod.Spec.NUMANode, err)}
 		}
 	}
-	return nil
+	return acquired, nil
 }
 
 func (s *podScope) admitUsingPodResources(ctx context.Context, pod *v1.Pod, operation lifecycle.Operation) lifecycle.PodAdmitResult {

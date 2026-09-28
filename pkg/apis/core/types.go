@@ -4089,6 +4089,7 @@ type PodSpec struct {
 	// - spec.hostIPC
 	// - spec.hostUsers
 	// - spec.resources
+	// - spec.numaNode
 	// - spec.securityContext.appArmorProfile
 	// - spec.securityContext.seLinuxOptions
 	// - spec.securityContext.seccompProfile
@@ -4203,6 +4204,11 @@ type PodSpec struct {
 	// +featureGate=EvictionRequestAPI
 	// +optional
 	EvictionResponders []EvictionResponder
+
+	// NUMANode is the required NUMA node for all containers in the pod.
+	// Nil means that the pod has no explicit NUMA placement requirement.
+	// +optional
+	NUMANode *int32
 }
 
 // PodResourceClaim references exactly one ResourceClaim through a ClaimSource.

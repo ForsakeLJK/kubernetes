@@ -206,6 +206,7 @@ type PodSpecApplyConfiguration struct {
 	// - spec.hostIPC
 	// - spec.hostUsers
 	// - spec.resources
+	// - spec.numaNode
 	// - spec.securityContext.appArmorProfile
 	// - spec.securityContext.seLinuxOptions
 	// - spec.securityContext.seccompProfile
@@ -299,6 +300,10 @@ type PodSpecApplyConfiguration struct {
 	// Responders are not supported when the pod is part of a PodGroup (.spec.schedulingGroup is set).
 	// This field can only be set on creation and is immutable afterwards.
 	EvictionResponders []EvictionResponderApplyConfiguration `json:"evictionResponders,omitempty"`
+	// numaNode is the required NUMA node for all containers in the pod.
+	// Omission leaves NUMA placement to the kubelet's ordinary policies.
+	// This field is immutable.
+	NUMANode *int32 `json:"numaNode,omitempty"`
 }
 
 // PodSpecApplyConfiguration constructs a declarative configuration of the PodSpec type for use with
@@ -714,5 +719,13 @@ func (b *PodSpecApplyConfiguration) WithEvictionResponders(values ...*EvictionRe
 		}
 		b.EvictionResponders = append(b.EvictionResponders, *values[i])
 	}
+	return b
+}
+
+// WithNUMANode sets the NUMANode field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the NUMANode field is set to the value of the last call.
+func (b *PodSpecApplyConfiguration) WithNUMANode(value int32) *PodSpecApplyConfiguration {
+	b.NUMANode = &value
 	return b
 }

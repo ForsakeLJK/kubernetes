@@ -4709,6 +4709,7 @@ type PodSpec struct {
 	// - spec.hostIPC
 	// - spec.hostUsers
 	// - spec.resources
+	// - spec.numaNode
 	// - spec.securityContext.appArmorProfile
 	// - spec.securityContext.seLinuxOptions
 	// - spec.securityContext.seccompProfile
@@ -4844,6 +4845,12 @@ type PodSpec struct {
 	// +k8s:maxItems=10
 	// +k8s:alpha(since: "1.37")=+k8s:dependentForbidden("schedulingGroup")
 	EvictionResponders []EvictionResponder `json:"evictionResponders,omitempty" patchStrategy:"merge" patchMergeKey:"name" protobuf:"bytes,44,rep,name=evictionResponders"`
+
+	// numaNode is the required NUMA node for all containers in the pod.
+	// Omission leaves NUMA placement to the kubelet's ordinary policies.
+	// This field is immutable.
+	// +optional
+	NUMANode *int32 `json:"numaNode,omitempty" protobuf:"varint,45,opt,name=numaNode"`
 }
 
 // PodResourceClaim references exactly one ResourceClaim, either directly

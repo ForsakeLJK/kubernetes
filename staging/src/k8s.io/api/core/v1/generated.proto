@@ -4977,6 +4977,7 @@ message PodSpec {
   // - spec.hostIPC
   // - spec.hostUsers
   // - spec.resources
+  // - spec.numaNode
   // - spec.securityContext.appArmorProfile
   // - spec.securityContext.seLinuxOptions
   // - spec.securityContext.seccompProfile
@@ -5111,6 +5112,12 @@ message PodSpec {
   // +k8s:maxItems=10
   // +k8s:alpha(since: "1.37")=+k8s:dependentForbidden("schedulingGroup")
   repeated EvictionResponder evictionResponders = 44;
+
+  // numaNode is the required NUMA node for all containers in the pod.
+  // Omission leaves NUMA placement to the kubelet's ordinary policies.
+  // This field is immutable.
+  // +optional
+  optional int32 numaNode = 45;
 }
 
 // PodStatus represents information about the status of a pod. Status may trail the actual

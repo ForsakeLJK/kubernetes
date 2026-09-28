@@ -931,6 +931,7 @@ spec:
       nodeName: nodeNameValue
       nodeSelector:
         nodeSelectorKey: nodeSelectorValue
+      numaNode: 45
       os:
         name: nameValue
       overhead:

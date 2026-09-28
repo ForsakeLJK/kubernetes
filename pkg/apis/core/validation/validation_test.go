@@ -24782,6 +24782,7 @@ func TestValidateOSFields(t *testing.T) {
 	// - Add documentation to the os field in the api
 	// - Add validation logic validateLinux, validateWindows functions to make sure the field is only set for eligible OSes
 	osSpecificFields := sets.NewString(
+		"NUMANode",
 		"Containers[*].SecurityContext.AppArmorProfile",
 		"Containers[*].SecurityContext.AllowPrivilegeEscalation",
 		"Containers[*].SecurityContext.Capabilities",

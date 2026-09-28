@@ -1903,7 +1903,8 @@
             "name": "nameValue",
             "priority": 2
           }
-        ]
+        ],
+        "numaNode": 45
       }
     },
     "strategy": {

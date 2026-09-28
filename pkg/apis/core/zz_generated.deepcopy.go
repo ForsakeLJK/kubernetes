@@ -4804,6 +4804,11 @@ func (in *PodSpec) DeepCopyInto(out *PodSpec) {
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
 	}
+	if in.NUMANode != nil {
+		in, out := &in.NUMANode, &out.NUMANode
+		*out = new(int32)
+		**out = **in
+	}
 	return
 }
 

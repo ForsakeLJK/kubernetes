@@ -1197,7 +1197,10 @@ func NewMainKubelet(ctx context.Context,
 	klet.shutdownManager = shutdownManager
 	handlers = append(handlers, shutdownManager)
 
-	klet.allocationManager.AddPodAdmitHandlers(append([]lifecycle.PodAdmitHandler{resizeAdmitHandler}, handlers...))
+	klet.allocationManager.AddPodAdmitHandlers(append([]lifecycle.PodAdmitHandler{
+		newNUMAPlacementAdmitHandler(klet.GetNodeConfig(), klet.GetCachedMachineInfo),
+		resizeAdmitHandler,
+	}, handlers...))
 
 	var usernsIDsPerPod *int64
 	if kubeCfg.UserNamespaces != nil {

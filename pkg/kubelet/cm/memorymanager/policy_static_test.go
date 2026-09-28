@@ -1237,9 +1237,11 @@ func TestStaticPolicyRequestedNUMAMemoryAllocation(t *testing.T) {
 		name      string
 		free      uint64
 		wantError bool
+		omitted   bool
 	}{
 		{name: "memory mask is requested node", free: 2 * gb},
 		{name: "spare memory elsewhere cannot satisfy shortage", free: 512 * mb, wantError: true},
+		{name: "omitted field retains default node selection", free: 512 * mb, omitted: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			stateForNode := func(free uint64) *state.NUMANodeState {
@@ -1247,18 +1249,24 @@ func TestStaticPolicyRequestedNUMAMemoryAllocation(t *testing.T) {
 					v1.ResourceMemory: {Allocatable: 2 * gb, Free: free, TotalMemSize: 2 * gb},
 				}}
 			}
+			casePod := pod.DeepCopy()
+			hint := &topologymanager.TopologyHint{NUMANodeAffinity: newNUMAAffinity(2), Preferred: true}
+			if tc.omitted {
+				casePod.Spec.NUMANode = nil
+				hint = &topologymanager.TopologyHint{}
+			}
 			testCase := testStaticPolicy{
-				pod:            pod,
+				pod:            casePod,
 				machineState:   state.NUMANodeMap{0: stateForNode(2 * gb), 2: stateForNode(tc.free)},
 				systemReserved: systemReservedMemory{0: {v1.ResourceMemory: 512 * mb}},
 			}
-			p, s, err := initTests(t, &testCase, &topologymanager.TopologyHint{NUMANodeAffinity: newNUMAAffinity(2), Preferred: true}, nil)
+			p, s, err := initTests(t, &testCase, hint, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
-			err = p.Allocate(ctx, s, pod, &pod.Spec.Containers[0], lifecycle.AddOperation)
+			err = p.Allocate(ctx, s, casePod, &casePod.Spec.Containers[0], lifecycle.AddOperation)
 			if tc.wantError {
-				if err == nil || !strings.Contains(err.Error(), "NUMA node 2") || s.GetMemoryBlocks(string(pod.UID), "app") != nil {
+				if err == nil || !strings.Contains(err.Error(), "NUMA node 2") || s.GetMemoryBlocks(string(casePod.UID), "app") != nil {
 					t.Fatalf("memory shortage left an allocation or poor error: %v", err)
 				}
 				return
@@ -1266,7 +1274,13 @@ func TestStaticPolicyRequestedNUMAMemoryAllocation(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			blocks := s.GetMemoryBlocks(string(pod.UID), "app")
+			blocks := s.GetMemoryBlocks(string(casePod.UID), "app")
+			if tc.omitted {
+				if len(blocks) != 1 || !reflect.DeepEqual(blocks[0].NUMAAffinity, []int{0}) {
+					t.Fatalf("omitted-field memory allocation lost default selection: %+v", blocks)
+				}
+				return
+			}
 			if len(blocks) != 1 || !reflect.DeepEqual(blocks[0].NUMAAffinity, []int{2}) || s.GetMachineState()[0].MemoryMap[v1.ResourceMemory].Free != 2*gb {
 				t.Fatalf("memory was not confined to NUMA node 2: blocks=%+v", blocks)
 			}

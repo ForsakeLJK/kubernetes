@@ -83,7 +83,11 @@ func TestRequestedNUMAPlacement(t *testing.T) {
 			pod := newPod()
 			result := s.Admit(ctx, pod, lifecycle.AddOperation)
 			if tc.fail != "" {
-				if result.Admit || result.Reason != "NUMAPlacementFailed" || !strings.Contains(result.Message, tc.fail) || !strings.Contains(result.Message, "NUMA node 2") {
+				wantReason := "NUMAPlacementFailed"
+				if tc.fail == "device" {
+					wantReason = ErrorTopologyAffinity
+				}
+				if result.Admit || result.Reason != wantReason || !strings.Contains(strings.ToLower(result.Message), tc.fail) || !strings.Contains(result.Message, "NUMA node 2") {
 					t.Fatalf("admission = %+v, want %s failure", result, tc.fail)
 				}
 				return
@@ -92,6 +96,15 @@ func TestRequestedNUMAPlacement(t *testing.T) {
 				t.Fatalf("requested node was not selected: %+v", result)
 			}
 		})
+	}
+	omitted := newPod()
+	omitted.Spec.NUMANode = nil
+	omittedScope := NewPodScope(NewSingleNumaNodePolicy(info, PolicyOptions{})).(*podScope)
+	omittedHints := []TopologyHint{{NUMANodeAffinity: NewTestBitMask(0), Preferred: true}, {NUMANodeAffinity: NewTestBitMask(2), Preferred: false}}
+	omittedScope.AddHintProvider(logger, &numaPlacementTestProvider{mockHintProvider: mockHintProvider{th: map[string][]TopologyHint{"cpu": omittedHints}}})
+	omittedScope.AddHintProvider(logger, &numaPlacementTestProvider{mockHintProvider: mockHintProvider{th: map[string][]TopologyHint{"memory": omittedHints}}})
+	if result := omittedScope.Admit(ctx, omitted, lifecycle.AddOperation); !result.Admit || !omittedScope.GetAffinity(logger, string(omitted.UID), "app").NUMANodeAffinity.IsEqual(NewTestBitMask(0)) {
+		t.Fatalf("omitted-field topology selection changed: %+v", result)
 	}
 	first := &numaPlacementTestProvider{mockHintProvider: mockHintProvider{th: map[string][]TopologyHint{"cpu": {{NUMANodeAffinity: NewTestBitMask(2), Preferred: true}}}}}
 	second := &numaPlacementTestProvider{

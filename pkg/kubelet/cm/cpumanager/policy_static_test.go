@@ -799,9 +799,11 @@ func TestStaticPolicyRequestedNUMACPUAllocation(t *testing.T) {
 		name      string
 		available cpuset.CPUSet
 		wantError bool
+		omitted   bool
 	}{
 		{name: "only requested node is assigned", available: cpuset.New(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11)},
 		{name: "spare CPUs elsewhere cannot satisfy shortage", available: cpuset.New(0, 1, 2, 4, 6, 8, 10), wantError: true},
+		{name: "omitted field retains CPU fallback", available: cpuset.New(0, 1, 2, 4, 6, 8, 10), omitted: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tm := topologymanager.NewFakeManagerWithHint(logger, &topologymanager.TopologyHint{NUMANodeAffinity: newNUMAAffinity(1), Preferred: true})
@@ -811,7 +813,9 @@ func TestStaticPolicyRequestedNUMACPUAllocation(t *testing.T) {
 			}
 			st := &mockState{assignments: state.ContainerCPUAssignments{}, defaultCPUSet: tc.available, baselines: state.ContainerCPUBaselines{}}
 			pod := makePod("numa-pod", "app", "2000m", "2000m")
-			pod.Spec.NUMANode = &node
+			if !tc.omitted {
+				pod.Spec.NUMANode = &node
+			}
 			container := &pod.Spec.Containers[0]
 			err = policy.Allocate(logger, st, pod, container, lifecycle.AddOperation)
 			if tc.wantError {
@@ -827,6 +831,12 @@ func TestStaticPolicyRequestedNUMACPUAllocation(t *testing.T) {
 				t.Fatal(err)
 			}
 			assigned, exists := st.GetCPUSet(string(pod.UID), container.Name)
+			if tc.omitted {
+				if !exists || assigned.Size() != 2 || assigned.IsSubsetOf(topoDualSocketHT.CPUDetails.CPUsInNUMANodes(1)) {
+					t.Fatalf("omitted-field CPU allocation lost fallback: %s", assigned)
+				}
+				return
+			}
 			if !exists || assigned.Size() != 2 || !assigned.IsSubsetOf(topoDualSocketHT.CPUDetails.CPUsInNUMANodes(1)) {
 				t.Fatalf("CPU assignment %s is not confined to NUMA node 1", assigned)
 			}

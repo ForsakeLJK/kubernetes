@@ -82,7 +82,7 @@ func (s *podScope) admitUsingContainerResources(ctx context.Context, pod *v1.Pod
 		var err error
 		bestHint, err = s.requestedAffinity(logger, pod, operation)
 		if err != nil {
-			return admission.GetPodAdmitResult(numaPlacementError{err.Error()})
+			return admission.GetPodAdmitResult(err)
 		}
 		admit = true
 	} else {
@@ -117,11 +117,16 @@ type numaPlacementError struct{ message string }
 func (e numaPlacementError) Error() string { return e.message }
 func (e numaPlacementError) Type() string  { return "NUMAPlacementFailed" }
 
+type numaDeviceAffinityError struct{ message string }
+
+func (e numaDeviceAffinityError) Error() string { return e.message }
+func (e numaDeviceAffinityError) Type() string  { return ErrorTopologyAffinity }
+
 func (s *podScope) requestedAffinity(logger klog.Logger, pod *v1.Pod, operation lifecycle.Operation) (TopologyHint, error) {
 	id := int(*pod.Spec.NUMANode)
 	mask, err := bitmask.NewBitMask(id)
 	if err != nil {
-		return TopologyHint{}, err
+		return TopologyHint{}, numaPlacementError{fmt.Sprintf("invalid requested NUMA node %d: %v", id, err)}
 	}
 	providersHints := s.accumulateProvidersHints(logger, pod, operation)
 	for providerIndex, resources := range providersHints {
@@ -139,7 +144,13 @@ func (s *podScope) requestedAffinity(logger klog.Logger, pod *v1.Pod, operation 
 				}
 			}
 			if len(matching) == 0 {
-				return TopologyHint{}, fmt.Errorf("NUMA node %d cannot satisfy %s topology or capacity requirement", id, name)
+				if !resourceRequired {
+					return TopologyHint{}, numaDeviceAffinityError{fmt.Sprintf("NUMA node %d: %s (%s)", id, NewTopologyAffinityError(), name)}
+				}
+				if name == string(v1.ResourceCPU) {
+					return TopologyHint{}, numaPlacementError{fmt.Sprintf("NUMA node %d has insufficient eligible CPUs or incompatible CPU topology", id)}
+				}
+				return TopologyHint{}, numaPlacementError{fmt.Sprintf("NUMA node %d has insufficient ordinary memory or incompatible memory topology", id)}
 			}
 			filteredResources[name] = matching
 		}
@@ -147,7 +158,7 @@ func (s *podScope) requestedAffinity(logger klog.Logger, pod *v1.Pod, operation 
 	}
 	hint, admit := s.policy.Merge(logger, providersHints)
 	if !admit || hint.NUMANodeAffinity != nil && !hint.NUMANodeAffinity.IsSet(id) {
-		return TopologyHint{}, fmt.Errorf("NUMA node %d conflicts with a provider topology policy", id)
+		return TopologyHint{}, numaDeviceAffinityError{fmt.Sprintf("NUMA node %d: %s", id, NewTopologyAffinityError())}
 	}
 	return TopologyHint{NUMANodeAffinity: mask, Preferred: true}, nil
 }

@@ -49,10 +49,16 @@ func (h *numaPlacementAdmitHandler) Admit(_ context.Context, attrs *lifecycle.Po
 		}
 	}
 	info, err := h.getMachineInfo()
-	if err != nil || info == nil {
+	if err != nil {
 		return lifecycle.PodAdmitResult{
 			Reason:  "NUMAPlacementUnsupported",
 			Message: fmt.Sprintf("cannot verify NUMA node %d against local machine topology: %v", id, err),
+		}
+	}
+	if info == nil {
+		return lifecycle.PodAdmitResult{
+			Reason:  "NUMAPlacementUnsupported",
+			Message: fmt.Sprintf("cannot verify NUMA node %d: local machine topology information is unavailable", id),
 		}
 	}
 	for _, node := range info.Topology {

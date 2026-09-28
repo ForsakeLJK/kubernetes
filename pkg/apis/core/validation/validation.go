@@ -6252,6 +6252,7 @@ func ValidateEphemeralContainerStateTransition(newStatuses, oldStatuses []core.C
 func ValidatePodStatusUpdate(newPod, oldPod *core.Pod, opts PodValidationOptions) field.ErrorList {
 	fldPath := field.NewPath("metadata")
 	allErrs := ValidateObjectMetaUpdate(&newPod.ObjectMeta, &oldPod.ObjectMeta, fldPath)
+	allErrs = append(allErrs, validateImmutableNUMANode(newPod, oldPod)...)
 	allErrs = append(allErrs, ValidatePodSpecificAnnotationUpdates(newPod, oldPod, fldPath.Child("annotations"), opts)...)
 
 	fldPath = field.NewPath("status")

@@ -107,6 +107,9 @@ func TestPodNUMAPlacementUpdateValidation(t *testing.T) {
 	if errs := ValidatePodUpdate(newPod, oldPod, PodValidationOptions{}); !strings.Contains(fmt.Sprint(errs), "numaNode is immutable") {
 		t.Fatalf("adding numaNode after creation: %v", errs)
 	}
+	if errs := ValidatePodStatusUpdate(newPod, oldPod, PodValidationOptions{}); !strings.Contains(fmt.Sprint(errs), "numaNode is immutable") {
+		t.Fatalf("adding numaNode through status update: %v", errs)
+	}
 }
 
 func TestPodNUMAPlacementSubresources(t *testing.T) {

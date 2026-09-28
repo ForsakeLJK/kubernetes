@@ -42,11 +42,12 @@ func TestNUMAPlacementAdmission(t *testing.T) {
 	}
 	info := &cadvisorapi.MachineInfo{Topology: []cadvisorapi.Node{{Id: 0}, {Id: 2}}}
 	for _, tc := range []struct {
-		name   string
-		id     *int32
-		goos   string
-		config cm.NodeConfig
-		want   string
+		name        string
+		id          *int32
+		goos        string
+		config      cm.NodeConfig
+		want        string
+		missingInfo bool
 	}{
 		{name: "omitted", goos: "windows", want: ""},
 		{name: "zero exists", id: numaTestID(0), goos: "linux", config: config, want: "NUMAPlacementNotImplemented"},
@@ -57,9 +58,15 @@ func TestNUMAPlacementAdmission(t *testing.T) {
 		{name: "unsupported topology policy", id: numaTestID(0), goos: "linux", config: withoutPolicy(func(c *cm.NodeConfig) { c.TopologyManagerPolicy = "best-effort" }), want: "NUMAPlacementUnsupported"},
 		{name: "unsupported topology scope", id: numaTestID(0), goos: "linux", config: withoutPolicy(func(c *cm.NodeConfig) { c.TopologyManagerScope = "container" }), want: "NUMAPlacementUnsupported"},
 		{name: "unsupported OS", id: numaTestID(0), goos: "windows", config: config, want: "NUMAPlacementUnsupported"},
+		{name: "topology unavailable", id: numaTestID(0), goos: "linux", config: config, missingInfo: true, want: "NUMAPlacementUnsupported"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			h := &numaPlacementAdmitHandler{goos: tc.goos, config: tc.config, getMachineInfo: func() (*cadvisorapi.MachineInfo, error) { return info, nil }}
+			h := &numaPlacementAdmitHandler{goos: tc.goos, config: tc.config, getMachineInfo: func() (*cadvisorapi.MachineInfo, error) {
+				if tc.missingInfo {
+					return nil, nil
+				}
+				return info, nil
+			}}
 			pod := &v1.Pod{Spec: v1.PodSpec{NUMANode: tc.id}}
 			result := h.Admit(context.Background(), &lifecycle.PodAdmitAttributes{Pod: pod})
 			if result.Reason != tc.want || result.Admit != (tc.want == "") {
@@ -67,6 +74,9 @@ func TestNUMAPlacementAdmission(t *testing.T) {
 			}
 			if tc.id != nil && !strings.Contains(result.Message, fmt.Sprintf("NUMA node %d", *tc.id)) {
 				t.Fatalf("message %q does not identify requested NUMA node", result.Message)
+			}
+			if tc.missingInfo && !strings.Contains(result.Message, "topology information is unavailable") {
+				t.Fatalf("missing topology message is not actionable: %q", result.Message)
 			}
 		})
 	}

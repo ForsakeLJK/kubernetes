@@ -1222,6 +1222,58 @@ func TestStaticPolicyStart(t *testing.T) {
 	}
 }
 
+func TestStaticPolicyRequestedNUMAMemoryAllocation(t *testing.T) {
+	_, ctx := ktesting.NewTestContext(t)
+	nodeID := int32(2)
+	quantity := resource.MustParse("1Gi")
+	pod := &v1.Pod{ObjectMeta: metav1.ObjectMeta{UID: types.UID("numa-pod")}, Spec: v1.PodSpec{
+		NUMANode: &nodeID,
+		Containers: []v1.Container{{Name: "app", Resources: v1.ResourceRequirements{
+			Requests: v1.ResourceList{v1.ResourceCPU: resource.MustParse("1"), v1.ResourceMemory: quantity},
+			Limits:   v1.ResourceList{v1.ResourceCPU: resource.MustParse("1"), v1.ResourceMemory: quantity},
+		}}},
+	}}
+	for _, tc := range []struct {
+		name      string
+		free      uint64
+		wantError bool
+	}{
+		{name: "memory mask is requested node", free: 2 * gb},
+		{name: "spare memory elsewhere cannot satisfy shortage", free: 512 * mb, wantError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stateForNode := func(free uint64) *state.NUMANodeState {
+				return &state.NUMANodeState{MemoryMap: map[v1.ResourceName]*state.MemoryTable{
+					v1.ResourceMemory: {Allocatable: 2 * gb, Free: free, TotalMemSize: 2 * gb},
+				}}
+			}
+			testCase := testStaticPolicy{
+				pod:            pod,
+				machineState:   state.NUMANodeMap{0: stateForNode(2 * gb), 2: stateForNode(tc.free)},
+				systemReserved: systemReservedMemory{0: {v1.ResourceMemory: 512 * mb}},
+			}
+			p, s, err := initTests(t, &testCase, &topologymanager.TopologyHint{NUMANodeAffinity: newNUMAAffinity(2), Preferred: true}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = p.Allocate(ctx, s, pod, &pod.Spec.Containers[0], lifecycle.AddOperation)
+			if tc.wantError {
+				if err == nil || !strings.Contains(err.Error(), "NUMA node 2") || s.GetMemoryBlocks(string(pod.UID), "app") != nil {
+					t.Fatalf("memory shortage left an allocation or poor error: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			blocks := s.GetMemoryBlocks(string(pod.UID), "app")
+			if len(blocks) != 1 || !reflect.DeepEqual(blocks[0].NUMAAffinity, []int{2}) || s.GetMachineState()[0].MemoryMap[v1.ResourceMemory].Free != 2*gb {
+				t.Fatalf("memory was not confined to NUMA node 2: blocks=%+v", blocks)
+			}
+		})
+	}
+}
+
 func TestStaticPolicyAllocate(t *testing.T) {
 	logger, ctx := ktesting.NewTestContext(t)
 	testCases := []testStaticPolicy{

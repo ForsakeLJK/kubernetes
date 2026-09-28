@@ -22,6 +22,8 @@ import (
 	"runtime"
 
 	cadvisorapi "github.com/google/cadvisor/lib/model"
+	v1 "k8s.io/api/core/v1"
+	v1helper "k8s.io/kubernetes/pkg/apis/core/v1/helper"
 	"k8s.io/kubernetes/pkg/kubelet/cm"
 	"k8s.io/kubernetes/pkg/kubelet/lifecycle"
 )
@@ -63,9 +65,12 @@ func (h *numaPlacementAdmitHandler) Admit(_ context.Context, attrs *lifecycle.Po
 	}
 	for _, node := range info.Topology {
 		if node.Id == int(id) {
+			if supportedNUMAPlacementPod(attrs.Pod) {
+				return lifecycle.PodAdmitResult{Admit: true}
+			}
 			return lifecycle.PodAdmitResult{
 				Reason:  "NUMAPlacementNotImplemented",
-				Message: fmt.Sprintf("NUMA node %d exists, but explicit NUMA placement allocation is not yet supported by this kubelet", id),
+				Message: fmt.Sprintf("NUMA node %d: explicit placement for multiple containers, init containers, or hugepages is not yet supported", id),
 			}
 		}
 	}
@@ -73,4 +78,21 @@ func (h *numaPlacementAdmitHandler) Admit(_ context.Context, attrs *lifecycle.Po
 		Reason:  "NUMANodeNotFound",
 		Message: fmt.Sprintf("NUMA node %d is absent from the local machine topology", id),
 	}
+}
+
+func supportedNUMAPlacementPod(pod *v1.Pod) bool {
+	if len(pod.Spec.Containers) != 1 || len(pod.Spec.InitContainers) != 0 {
+		return false
+	}
+	for resourceName := range pod.Spec.Containers[0].Resources.Requests {
+		if v1helper.IsHugePageResourceName(resourceName) {
+			return false
+		}
+	}
+	for resourceName := range pod.Spec.Containers[0].Resources.Limits {
+		if v1helper.IsHugePageResourceName(resourceName) {
+			return false
+		}
+	}
+	return true
 }

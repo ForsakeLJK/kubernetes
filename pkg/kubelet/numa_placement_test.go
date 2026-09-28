@@ -24,6 +24,7 @@ import (
 
 	cadvisorapi "github.com/google/cadvisor/lib/model"
 	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/kubernetes/pkg/kubelet/cm"
 	"k8s.io/kubernetes/pkg/kubelet/lifecycle"
 )
@@ -42,12 +43,13 @@ func TestNUMAPlacementAdmission(t *testing.T) {
 	}
 	info := &cadvisorapi.MachineInfo{Topology: []cadvisorapi.Node{{Id: 0}, {Id: 2}}}
 	for _, tc := range []struct {
-		name        string
-		id          *int32
-		goos        string
-		config      cm.NodeConfig
-		want        string
-		missingInfo bool
+		name            string
+		id              *int32
+		goos            string
+		config          cm.NodeConfig
+		want            string
+		missingInfo     bool
+		singleContainer bool
 	}{
 		{name: "omitted", goos: "windows", want: ""},
 		{name: "zero exists", id: numaTestID(0), goos: "linux", config: config, want: "NUMAPlacementNotImplemented"},
@@ -59,6 +61,7 @@ func TestNUMAPlacementAdmission(t *testing.T) {
 		{name: "unsupported topology scope", id: numaTestID(0), goos: "linux", config: withoutPolicy(func(c *cm.NodeConfig) { c.TopologyManagerScope = "container" }), want: "NUMAPlacementUnsupported"},
 		{name: "unsupported OS", id: numaTestID(0), goos: "windows", config: config, want: "NUMAPlacementUnsupported"},
 		{name: "topology unavailable", id: numaTestID(0), goos: "linux", config: config, missingInfo: true, want: "NUMAPlacementUnsupported"},
+		{name: "single container is supported", id: numaTestID(2), goos: "linux", config: config, want: "", singleContainer: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := &numaPlacementAdmitHandler{goos: tc.goos, config: tc.config, getMachineInfo: func() (*cadvisorapi.MachineInfo, error) {
@@ -68,11 +71,14 @@ func TestNUMAPlacementAdmission(t *testing.T) {
 				return info, nil
 			}}
 			pod := &v1.Pod{Spec: v1.PodSpec{NUMANode: tc.id}}
+			if tc.singleContainer {
+				pod.Spec.Containers = []v1.Container{{Name: "workload"}}
+			}
 			result := h.Admit(context.Background(), &lifecycle.PodAdmitAttributes{Pod: pod})
 			if result.Reason != tc.want || result.Admit != (tc.want == "") {
 				t.Fatalf("admission = %+v, want reason %q", result, tc.want)
 			}
-			if tc.id != nil && !strings.Contains(result.Message, fmt.Sprintf("NUMA node %d", *tc.id)) {
+			if tc.id != nil && tc.want != "" && !strings.Contains(result.Message, fmt.Sprintf("NUMA node %d", *tc.id)) {
 				t.Fatalf("message %q does not identify requested NUMA node", result.Message)
 			}
 			if tc.missingInfo && !strings.Contains(result.Message, "topology information is unavailable") {
@@ -83,3 +89,28 @@ func TestNUMAPlacementAdmission(t *testing.T) {
 }
 
 func numaTestID(id int32) *int32 { return &id }
+
+func TestNUMAPlacementUnsupportedWorkloads(t *testing.T) {
+	config := cm.NodeConfig{CPUManagerPolicy: "static", MemoryManagerPolicy: "Static", TopologyManagerPolicy: "single-numa-node", TopologyManagerScope: "pod"}
+	h := &numaPlacementAdmitHandler{goos: "linux", config: config, getMachineInfo: func() (*cadvisorapi.MachineInfo, error) {
+		return &cadvisorapi.MachineInfo{Topology: []cadvisorapi.Node{{Id: 0}}}, nil
+	}}
+	hugepages := v1.ResourceName(v1.ResourceHugePagesPrefix + "2Mi")
+	for _, tc := range []struct {
+		name string
+		spec v1.PodSpec
+	}{
+		{name: "multiple applications", spec: v1.PodSpec{Containers: []v1.Container{{Name: "one"}, {Name: "two"}}}},
+		{name: "init container", spec: v1.PodSpec{Containers: []v1.Container{{Name: "app"}}, InitContainers: []v1.Container{{Name: "init"}}}},
+		{name: "hugepages", spec: v1.PodSpec{Containers: []v1.Container{{Name: "app", Resources: v1.ResourceRequirements{Limits: v1.ResourceList{hugepages: resource.MustParse("2Mi")}}}}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pod := &v1.Pod{Spec: tc.spec}
+			pod.Spec.NUMANode = numaTestID(0)
+			result := h.Admit(context.Background(), &lifecycle.PodAdmitAttributes{Pod: pod})
+			if result.Admit || result.Reason != "NUMAPlacementNotImplemented" {
+				t.Fatalf("unsupported workload was admitted: %+v", result)
+			}
+		})
+	}
+}

@@ -713,6 +713,27 @@ func (b *containerAllocateResponseBuilder) Build() *pluginapi.ContainerAllocateR
 	return resp
 }
 
+func TestNUMAPlacementDeviceRollbackPreservesExistingAssignments(t *testing.T) {
+	checkpointManager, err := checkpointmanager.NewCheckpointManager(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := &ManagerImpl{podDevices: newPodDevices(), checkpointManager: checkpointManager}
+	pod := &v1.Pod{ObjectMeta: metav1.ObjectMeta{UID: types.UID("numa-pod")}}
+	container := &v1.Container{Name: "app"}
+	m.podDevices.insert(string(pod.UID), container.Name, "example.com/existing", checkpoint.DevicesPerNUMA{0: {"old"}}, &pluginapi.ContainerAllocateResponse{})
+	rollback := m.SnapshotNUMAPlacement(pod, container)
+	m.podDevices.insert(string(pod.UID), container.Name, "example.com/new", checkpoint.DevicesPerNUMA{0: {"new"}}, &pluginapi.ContainerAllocateResponse{})
+	if err := rollback(klog.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !m.podDevices.containerDevices(string(pod.UID), container.Name, "example.com/existing").Has("old") ||
+		m.podDevices.containerDevices(string(pod.UID), container.Name, "example.com/new") != nil ||
+		!m.allocatedDevices["example.com/existing"].Has("old") {
+		t.Fatal("rollback removed existing devices or retained newly allocated devices")
+	}
+}
+
 func TestCheckpoint(t *testing.T) {
 	logger, _ := ktesting.NewTestContext(t)
 	resourceName1 := "domain1.com/resource1"

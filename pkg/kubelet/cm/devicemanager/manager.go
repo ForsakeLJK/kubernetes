@@ -442,6 +442,38 @@ func (m *ManagerImpl) Allocate(ctx context.Context, pod *v1.Pod, container *v1.C
 	return nil
 }
 
+// SnapshotNUMAPlacement returns cleanup for device records created by one explicit
+// placement attempt. Existing checkpointed records are outside that attempt.
+func (m *ManagerImpl) SnapshotNUMAPlacement(pod *v1.Pod, container *v1.Container) func(klog.Logger) error {
+	podUID, containerName := string(pod.UID), container.Name
+	m.podDevices.RLock()
+	previous := make(map[string]bool)
+	for resource := range m.podDevices.devs[podUID][containerName] {
+		previous[resource] = true
+	}
+	m.podDevices.RUnlock()
+	return func(logger klog.Logger) error {
+		m.mutex.Lock()
+		m.podDevices.Lock()
+		changed := false
+		for resource := range m.podDevices.devs[podUID][containerName] {
+			if !previous[resource] {
+				m.podDevices.deleteResourceLocked(podUID, containerName, resource)
+				changed = true
+			}
+		}
+		m.podDevices.Unlock()
+		if changed {
+			m.regenerateAllocatedDevicesLocked()
+		}
+		m.mutex.Unlock()
+		if changed {
+			return m.writeCheckpoint(logger)
+		}
+		return nil
+	}
+}
+
 // UpdatePluginResources updates node resources based on devices already allocated to pods.
 func (m *ManagerImpl) UpdatePluginResources(node *schedulerframework.NodeInfo, attrs *lifecycle.PodAdmitAttributes) error {
 	pod := attrs.Pod

@@ -479,6 +479,13 @@ func (p *staticPolicy) Allocate(ctx context.Context, s state.State, pod *v1.Pod,
 		}
 	}()
 	if blocks := s.GetMemoryBlocks(podUID, container.Name); blocks != nil {
+		if pod.Spec.NUMANode != nil {
+			for _, block := range blocks {
+				if len(block.NUMAAffinity) != 1 || block.NUMAAffinity[0] != int(*pod.Spec.NUMANode) {
+					return fmt.Errorf("memory assignment conflicts with requested NUMA node %d", *pod.Spec.NUMANode)
+				}
+			}
+		}
 		p.updatePodReusableMemory(pod, container, blocks)
 
 		logger.Info("Container already present in state, skipping")
@@ -487,6 +494,26 @@ func (p *staticPolicy) Allocate(ctx context.Context, s state.State, pod *v1.Pod,
 
 	// Call Topology Manager to get the aligned affinity across all hint providers.
 	hint := p.affinity.GetAffinity(logger, podUID, container.Name)
+	if pod.Spec.NUMANode != nil {
+		requested, err := bitmask.NewBitMask(int(*pod.Spec.NUMANode))
+		if err != nil {
+			return err
+		}
+		if hint.NUMANodeAffinity == nil || !hint.NUMANodeAffinity.IsEqual(requested) {
+			return fmt.Errorf("memory topology affinity does not select requested NUMA node %d", *pod.Spec.NUMANode)
+		}
+		machineState := s.GetMachineState()
+		node := machineState[int(*pod.Spec.NUMANode)]
+		if node == nil {
+			return fmt.Errorf("requested NUMA node %d has no memory state", *pod.Spec.NUMANode)
+		}
+		for resourceName, size := range requestedResources {
+			memory := node.MemoryMap[resourceName]
+			if memory == nil || memory.Free < size {
+				return fmt.Errorf("insufficient %s on requested NUMA node %d: need %d bytes", resourceName, *pod.Spec.NUMANode, size)
+			}
+		}
+	}
 	logger.Info("Got topology affinity", "hint", hint)
 
 	machineState := s.GetMachineState()
@@ -510,7 +537,7 @@ func (p *staticPolicy) Allocate(ctx context.Context, s state.State, pod *v1.Pod,
 	// unless skipExtend is set. skipExtend is set per container by the Windows BestEffort policy when
 	// the container follows the CPU manager's NUMA decision (see policy_best_effort.go); the Linux
 	// static policy never sets it, so the hint is extended as usual.
-	if !isAffinitySatisfyRequest(machineState, bestHint.NUMANodeAffinity, requestedResources) && !p.skipExtend {
+	if pod.Spec.NUMANode == nil && !isAffinitySatisfyRequest(machineState, bestHint.NUMANodeAffinity, requestedResources) && !p.skipExtend {
 		extendedHint, err := p.extendTopologyManagerHint(machineState, pod, requestedResources, bestHint.NUMANodeAffinity)
 		if err != nil {
 			return err

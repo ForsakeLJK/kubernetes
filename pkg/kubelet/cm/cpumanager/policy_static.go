@@ -916,6 +916,9 @@ func (p *staticPolicy) allocateForAdd(logger klog.Logger, s state.State, pod *v1
 	// restarted with full-pcpus-only=true, checkpointed allocations that don't
 	// satisfy SMT alignment are accepted to avoid disrupting running workloads.
 	if cset, ok := s.GetCPUSet(string(pod.UID), container.Name); ok {
+		if pod.Spec.NUMANode != nil && !cset.IsSubsetOf(p.topology.CPUDetails.CPUsInNUMANodes(int(*pod.Spec.NUMANode))) {
+			return fmt.Errorf("CPU assignment for NUMA node %d contains CPUs outside the requested node", *pod.Spec.NUMANode)
+		}
 		p.updateCPUsToReuse(pod, container, cset)
 		logger.Info("Static policy: container already present in state, skipping")
 		return nil
@@ -927,6 +930,27 @@ func (p *staticPolicy) allocateForAdd(logger klog.Logger, s state.State, pod *v1
 
 	// Call Topology Manager to get the aligned socket affinity across all hint providers.
 	hint := p.affinity.GetAffinity(logger, string(pod.UID), container.Name)
+	if pod.Spec.NUMANode != nil {
+		requested, err := bitmask.NewBitMask(int(*pod.Spec.NUMANode))
+		if err != nil {
+			return err
+		}
+		if hint.NUMANodeAffinity == nil || !hint.NUMANodeAffinity.IsEqual(requested) {
+			return fmt.Errorf("CPU topology affinity does not select requested NUMA node %d", *pod.Spec.NUMANode)
+		}
+		available := p.GetAvailableCPUs(s).Union(p.cpusToReuse[string(pod.UID)]).Intersection(p.topology.CPUDetails.CPUsInNUMANodes(int(*pod.Spec.NUMANode)))
+		if available.Size() < numCPUs {
+			return fmt.Errorf("insufficient eligible CPUs on requested NUMA node %d: need %d, have %d", *pod.Spec.NUMANode, numCPUs, available.Size())
+		}
+		allocation, err := p.takeByTopology(logger, available, numCPUs, 1)
+		if err != nil {
+			return fmt.Errorf("cannot allocate %d CPUs on requested NUMA node %d: %w", numCPUs, *pod.Spec.NUMANode, err)
+		}
+		s.SetDefaultCPUSet(s.GetDefaultCPUSet().Difference(allocation))
+		s.SetCPUSet(string(pod.UID), container.Name, allocation)
+		p.updateMetricsFromState(logger, s)
+		return nil
+	}
 	logger.Info("Topology Affinity", "affinity", hint)
 
 	// Allocate CPUs according to the NUMA affinity contained in the hint.

@@ -18,6 +18,7 @@ package topologymanager
 
 import (
 	"context"
+	"fmt"
 
 	v1 "k8s.io/api/core/v1"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
@@ -26,6 +27,7 @@ import (
 	"k8s.io/kubernetes/pkg/features"
 	"k8s.io/kubernetes/pkg/kubelet/cm/admission"
 	"k8s.io/kubernetes/pkg/kubelet/cm/containermap"
+	"k8s.io/kubernetes/pkg/kubelet/cm/topologymanager/bitmask"
 	"k8s.io/kubernetes/pkg/kubelet/lifecycle"
 	"k8s.io/kubernetes/pkg/kubelet/metrics"
 )
@@ -62,7 +64,30 @@ func (s *podScope) Admit(ctx context.Context, pod *v1.Pod, operation lifecycle.O
 func (s *podScope) admitUsingContainerResources(ctx context.Context, pod *v1.Pod, operation lifecycle.Operation) lifecycle.PodAdmitResult {
 	logger := klog.FromContext(ctx)
 
-	bestHint, admit := s.checkAffinity(logger, pod, operation)
+	var bestHint TopologyHint
+	var admit bool
+	if pod.Spec.NUMANode != nil {
+		if operation != lifecycle.AddOperation {
+			return admission.GetPodAdmitResult(numaPlacementError{fmt.Sprintf("NUMA node %d supports only new container allocation", *pod.Spec.NUMANode)})
+		}
+		for _, provider := range s.hintProviders {
+			if checker, ok := provider.(interface {
+				CheckNUMAPlacement(*v1.Pod, *v1.Container) error
+			}); ok {
+				if err := checker.CheckNUMAPlacement(pod, &pod.Spec.Containers[0]); err != nil {
+					return admission.GetPodAdmitResult(numaPlacementError{err.Error()})
+				}
+			}
+		}
+		var err error
+		bestHint, err = s.requestedAffinity(logger, pod, operation)
+		if err != nil {
+			return admission.GetPodAdmitResult(numaPlacementError{err.Error()})
+		}
+		admit = true
+	} else {
+		bestHint, admit = s.checkAffinity(logger, pod, operation)
+	}
 	if !admit {
 		return admission.GetPodAdmitResult(NewTopologyAffinityError())
 	}
@@ -71,7 +96,12 @@ func (s *podScope) admitUsingContainerResources(ctx context.Context, pod *v1.Pod
 		logger.Info("Topology Affinity", "bestHint", bestHint, "pod", klog.KObj(pod), "containerName", container.Name)
 		s.setTopologyHints(string(pod.UID), container.Name, bestHint)
 
-		err := s.allocateAlignedResources(ctx, pod, &container, operation)
+		var err error
+		if pod.Spec.NUMANode != nil {
+			err = s.allocateRequestedResources(ctx, pod, &container, operation)
+		} else {
+			err = s.allocateAlignedResources(ctx, pod, &container, operation)
+		}
 		if err != nil {
 			metrics.TopologyManagerAdmissionErrorsTotal.Inc()
 			return admission.GetPodAdmitResult(err)
@@ -80,6 +110,77 @@ func (s *podScope) admitUsingContainerResources(ctx context.Context, pod *v1.Pod
 
 	s.updateSuccessMetrics(logger, pod)
 	return admission.GetPodAdmitResult(nil)
+}
+
+type numaPlacementError struct{ message string }
+
+func (e numaPlacementError) Error() string { return e.message }
+func (e numaPlacementError) Type() string  { return "NUMAPlacementFailed" }
+
+func (s *podScope) requestedAffinity(logger klog.Logger, pod *v1.Pod, operation lifecycle.Operation) (TopologyHint, error) {
+	id := int(*pod.Spec.NUMANode)
+	mask, err := bitmask.NewBitMask(id)
+	if err != nil {
+		return TopologyHint{}, err
+	}
+	providersHints := s.accumulateProvidersHints(logger, pod, operation)
+	for providerIndex, resources := range providersHints {
+		filteredResources := make(map[string][]TopologyHint, len(resources))
+		for name, hints := range resources {
+			var matching []TopologyHint
+			resourceRequired := name == string(v1.ResourceCPU) || name == string(v1.ResourceMemory)
+			for _, hint := range hints {
+				if resourceRequired && hint.NUMANodeAffinity != nil && hint.NUMANodeAffinity.IsEqual(mask) ||
+					!resourceRequired && (hint.NUMANodeAffinity == nil || hint.NUMANodeAffinity.IsSet(id)) {
+					if resourceRequired {
+						hint.Preferred = true
+					}
+					matching = append(matching, hint)
+				}
+			}
+			if len(matching) == 0 {
+				return TopologyHint{}, fmt.Errorf("NUMA node %d cannot satisfy %s topology or capacity requirement", id, name)
+			}
+			filteredResources[name] = matching
+		}
+		providersHints[providerIndex] = filteredResources
+	}
+	hint, admit := s.policy.Merge(logger, providersHints)
+	if !admit || hint.NUMANodeAffinity != nil && !hint.NUMANodeAffinity.IsSet(id) {
+		return TopologyHint{}, fmt.Errorf("NUMA node %d conflicts with a provider topology policy", id)
+	}
+	return TopologyHint{NUMANodeAffinity: mask, Preferred: true}, nil
+}
+
+func (s *podScope) allocateRequestedResources(ctx context.Context, pod *v1.Pod, container *v1.Container, operation lifecycle.Operation) error {
+	logger := klog.FromContext(ctx)
+	var acquired []func() error
+	for _, provider := range s.hintProviders {
+		if snapshotter, ok := provider.(interface {
+			SnapshotNUMAPlacement(*v1.Pod, *v1.Container) func(klog.Logger) error
+		}); ok {
+			rollback := snapshotter.SnapshotNUMAPlacement(pod, container)
+			acquired = append(acquired, func() error { return rollback(logger) })
+		}
+		if releaser, ok := provider.(interface {
+			ReleaseNUMAPlacement(klog.Logger, *v1.Pod, *v1.Container) error
+		}); ok {
+			if checker, ok := provider.(interface {
+				NUMAPlacementAllocated(*v1.Pod, *v1.Container) bool
+			}); !ok || !checker.NUMAPlacementAllocated(pod, container) {
+				acquired = append(acquired, func() error { return releaser.ReleaseNUMAPlacement(logger, pod, container) })
+			}
+		}
+		if err := provider.Allocate(ctx, pod, container, operation); err != nil {
+			for i := len(acquired) - 1; i >= 0; i-- {
+				if releaseErr := acquired[i](); releaseErr != nil {
+					logger.Error(releaseErr, "Failed to release NUMA allocation after admission failure", "pod", klog.KObj(pod))
+				}
+			}
+			return numaPlacementError{fmt.Sprintf("NUMA node %d: %v", *pod.Spec.NUMANode, err)}
+		}
+	}
+	return nil
 }
 
 func (s *podScope) admitUsingPodResources(ctx context.Context, pod *v1.Pod, operation lifecycle.Operation) lifecycle.PodAdmitResult {

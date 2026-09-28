@@ -19,6 +19,7 @@ limitations under the License.
 package cm
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -29,6 +30,26 @@ import (
 )
 
 func (i *internalContainerLifecycleImpl) PreCreateContainer(logger klog.Logger, pod *v1.Pod, container *v1.Container, containerConfig *runtimeapi.ContainerConfig) error {
+	if pod.Spec.NUMANode != nil {
+		if i.cpuManager == nil || i.memoryManager == nil {
+			return fmt.Errorf("NUMA node %d requires CPU and memory managers", *pod.Spec.NUMANode)
+		}
+		cpuValidator, cpuOK := i.cpuManager.(interface {
+			ValidateNUMAPlacement(*v1.Pod, *v1.Container) error
+		})
+		memoryValidator, memoryOK := i.memoryManager.(interface {
+			ValidateNUMAPlacement(*v1.Pod, *v1.Container) error
+		})
+		if !cpuOK || !memoryOK {
+			return fmt.Errorf("NUMA node %d requires CPU and memory placement validation", *pod.Spec.NUMANode)
+		}
+		if err := cpuValidator.ValidateNUMAPlacement(pod, container); err != nil {
+			return err
+		}
+		if err := memoryValidator.ValidateNUMAPlacement(pod, container); err != nil {
+			return err
+		}
+	}
 	if i.cpuManager != nil {
 		allocatedCPUs := i.cpuManager.GetCPUAffinity(string(pod.UID), container.Name)
 		if !allocatedCPUs.IsEmpty() {

@@ -114,7 +114,8 @@ type manager struct {
 
 	// state allows to restore information regarding memory allocation for guaranteed pods
 	// in the case of the kubelet restart
-	state state.State
+	state                    state.State
+	numaPlacementAllocations map[string]bool
 
 	// containerRuntime is the container runtime service interface needed
 	// to make UpdateContainerResources() calls against the containers.
@@ -289,12 +290,70 @@ func (m *manager) Allocate(ctx context.Context, pod *v1.Pod, container *v1.Conta
 
 	m.Lock()
 	defer m.Unlock()
+	if pod.Spec.NUMANode != nil && m.state.GetMemoryBlocks(string(pod.UID), container.Name) != nil && !m.numaPlacementAllocations[numaPlacementKey(pod, container)] {
+		return fmt.Errorf("memory checkpoint assignment for requested NUMA node %d cannot be reused until restored placement is supported", *pod.Spec.NUMANode)
+	}
 
 	// Call down into the policy to assign this container memory if required.
 	if err := m.policy.Allocate(ctx, m.state, pod, container, operation); err != nil {
 		logger.Error(err, "Allocate error", "pod", klog.KObj(pod), "containerName", container.Name)
 		return err
 	}
+	if pod.Spec.NUMANode != nil {
+		if m.numaPlacementAllocations == nil {
+			m.numaPlacementAllocations = make(map[string]bool)
+		}
+		m.numaPlacementAllocations[numaPlacementKey(pod, container)] = true
+	}
+	return nil
+}
+
+func numaPlacementKey(pod *v1.Pod, container *v1.Container) string {
+	return string(pod.UID) + "/" + container.Name
+}
+
+func (m *manager) CheckNUMAPlacement(pod *v1.Pod, container *v1.Container) error {
+	m.Lock()
+	defer m.Unlock()
+	if m.state.GetMemoryBlocks(string(pod.UID), container.Name) != nil && !m.numaPlacementAllocations[numaPlacementKey(pod, container)] {
+		return fmt.Errorf("memory checkpoint assignment for requested NUMA node %d cannot be reused until restored placement is supported", *pod.Spec.NUMANode)
+	}
+	return nil
+}
+
+func (m *manager) NUMAPlacementAllocated(pod *v1.Pod, container *v1.Container) bool {
+	m.Lock()
+	defer m.Unlock()
+	return m.numaPlacementAllocations[numaPlacementKey(pod, container)]
+}
+
+func (m *manager) ValidateNUMAPlacement(pod *v1.Pod, container *v1.Container) error {
+	m.Lock()
+	defer m.Unlock()
+	if !m.numaPlacementAllocations[numaPlacementKey(pod, container)] {
+		return fmt.Errorf("memory allocation for requested NUMA node %d is unavailable or restored", *pod.Spec.NUMANode)
+	}
+	blocks := m.state.GetMemoryBlocks(string(pod.UID), container.Name)
+	if len(blocks) == 0 {
+		return fmt.Errorf("memory allocation for requested NUMA node %d is missing", *pod.Spec.NUMANode)
+	}
+	for _, block := range blocks {
+		if len(block.NUMAAffinity) != 1 || block.NUMAAffinity[0] != int(*pod.Spec.NUMANode) {
+			return fmt.Errorf("memory allocation is not confined to requested NUMA node %d", *pod.Spec.NUMANode)
+		}
+	}
+	return nil
+}
+
+func (m *manager) ReleaseNUMAPlacement(logger klog.Logger, pod *v1.Pod, container *v1.Container) error {
+	m.Lock()
+	defer m.Unlock()
+	key := numaPlacementKey(pod, container)
+	if !m.numaPlacementAllocations[key] {
+		return nil
+	}
+	m.policyRemoveContainerByRef(logger, string(pod.UID), container.Name)
+	delete(m.numaPlacementAllocations, key)
 	return nil
 }
 
@@ -404,6 +463,7 @@ func (m *manager) removeStaleState(logger klog.Logger) {
 func (m *manager) policyRemoveContainerByRef(logger klog.Logger, podUID string, containerName string) {
 	m.policy.RemoveContainer(logger, m.state, podUID, containerName)
 	m.containerMap.RemoveByContainerRef(podUID, containerName)
+	delete(m.numaPlacementAllocations, podUID+"/"+containerName)
 }
 
 func getTotalMemoryTypeReserved(machineInfo *cadvisorapi.MachineInfo, reservedMemory []kubeletconfig.MemoryReservation) (map[v1.ResourceName]resource.Quantity, error) {

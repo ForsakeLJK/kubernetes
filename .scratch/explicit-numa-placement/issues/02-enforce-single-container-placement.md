@@ -4,7 +4,7 @@
 
 **Blocked by:** 01 — Introduce and validate the NUMA placement requirement.
 
-**Status:** ready-for-agent
+**Status:** claimed
 
 **Type:** task
 

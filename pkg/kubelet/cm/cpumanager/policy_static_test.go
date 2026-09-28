@@ -792,6 +792,48 @@ func runStaticPolicyTestCaseWithFeatureGate(t *testing.T, testCase staticPolicyT
 	runStaticPolicyTestCase(t, testCase)
 }
 
+func TestStaticPolicyRequestedNUMACPUAllocation(t *testing.T) {
+	logger, _ := ktesting.NewTestContext(t)
+	node := int32(1)
+	for _, tc := range []struct {
+		name      string
+		available cpuset.CPUSet
+		wantError bool
+	}{
+		{name: "only requested node is assigned", available: cpuset.New(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11)},
+		{name: "spare CPUs elsewhere cannot satisfy shortage", available: cpuset.New(0, 1, 2, 4, 6, 8, 10), wantError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tm := topologymanager.NewFakeManagerWithHint(logger, &topologymanager.TopologyHint{NUMANodeAffinity: newNUMAAffinity(1), Preferred: true})
+			policy, err := NewStaticPolicy(logger, topoDualSocketHT, 1, cpuset.New(), tm, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			st := &mockState{assignments: state.ContainerCPUAssignments{}, defaultCPUSet: tc.available, baselines: state.ContainerCPUBaselines{}}
+			pod := makePod("numa-pod", "app", "2000m", "2000m")
+			pod.Spec.NUMANode = &node
+			container := &pod.Spec.Containers[0]
+			err = policy.Allocate(logger, st, pod, container, lifecycle.AddOperation)
+			if tc.wantError {
+				if err == nil || !strings.Contains(err.Error(), "NUMA node 1") {
+					t.Fatalf("allocation error = %v, want requested-node shortage", err)
+				}
+				if _, exists := st.GetCPUSet(string(pod.UID), container.Name); exists {
+					t.Fatal("failed allocation left a CPU assignment")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			assigned, exists := st.GetCPUSet(string(pod.UID), container.Name)
+			if !exists || assigned.Size() != 2 || !assigned.IsSubsetOf(topoDualSocketHT.CPUDetails.CPUsInNUMANodes(1)) {
+				t.Fatalf("CPU assignment %s is not confined to NUMA node 1", assigned)
+			}
+		})
+	}
+}
+
 func TestStaticPolicyAllocateRecordsBaseline(t *testing.T) {
 	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, pkgfeatures.InPlacePodVerticalScalingExclusiveCPUs, true)
 

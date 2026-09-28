@@ -125,7 +125,8 @@ type manager struct {
 
 	// state allows pluggable CPU assignment policies while sharing a common
 	// representation of state for the system to inspect and reconcile.
-	state state.State
+	state                    state.State
+	numaPlacementAllocations map[string]bool
 
 	// lastUpdatedstate holds state for each container from the last time it was updated.
 	lastUpdateState state.State
@@ -278,6 +279,11 @@ func (m *manager) Allocate(ctx context.Context, p *v1.Pod, c *v1.Container, oper
 
 	m.Lock()
 	defer m.Unlock()
+	if p.Spec.NUMANode != nil {
+		if _, exists := m.state.GetCPUSet(string(p.UID), c.Name); exists && !m.numaPlacementAllocations[numaPlacementKey(p, c)] {
+			return fmt.Errorf("CPU checkpoint assignment for requested NUMA node %d cannot be reused until restored placement is supported", *p.Spec.NUMANode)
+		}
+	}
 
 	// Call down into the policy to assign this container CPUs if required.
 	err := m.policy.Allocate(logger, m.state, p, c, operation)
@@ -285,7 +291,59 @@ func (m *manager) Allocate(ctx context.Context, p *v1.Pod, c *v1.Container, oper
 		logger.Error(err, "policy error")
 		return err
 	}
+	if p.Spec.NUMANode != nil {
+		if m.numaPlacementAllocations == nil {
+			m.numaPlacementAllocations = make(map[string]bool)
+		}
+		m.numaPlacementAllocations[numaPlacementKey(p, c)] = true
+	}
 
+	return nil
+}
+
+func numaPlacementKey(pod *v1.Pod, container *v1.Container) string {
+	return string(pod.UID) + "/" + container.Name
+}
+
+func (m *manager) CheckNUMAPlacement(pod *v1.Pod, container *v1.Container) error {
+	m.Lock()
+	defer m.Unlock()
+	if _, exists := m.state.GetCPUSet(string(pod.UID), container.Name); exists && !m.numaPlacementAllocations[numaPlacementKey(pod, container)] {
+		return fmt.Errorf("CPU checkpoint assignment for requested NUMA node %d cannot be reused until restored placement is supported", *pod.Spec.NUMANode)
+	}
+	return nil
+}
+
+func (m *manager) NUMAPlacementAllocated(pod *v1.Pod, container *v1.Container) bool {
+	m.Lock()
+	defer m.Unlock()
+	return m.numaPlacementAllocations[numaPlacementKey(pod, container)]
+}
+
+func (m *manager) ValidateNUMAPlacement(pod *v1.Pod, container *v1.Container) error {
+	m.Lock()
+	defer m.Unlock()
+	if !m.numaPlacementAllocations[numaPlacementKey(pod, container)] {
+		return fmt.Errorf("CPU allocation for requested NUMA node %d is unavailable or restored", *pod.Spec.NUMANode)
+	}
+	assigned, exists := m.state.GetCPUSet(string(pod.UID), container.Name)
+	if !exists || assigned.IsEmpty() || !assigned.IsSubsetOf(m.topology.CPUDetails.CPUsInNUMANodes(int(*pod.Spec.NUMANode))) {
+		return fmt.Errorf("CPU allocation is not confined to requested NUMA node %d", *pod.Spec.NUMANode)
+	}
+	return nil
+}
+
+func (m *manager) ReleaseNUMAPlacement(logger klog.Logger, pod *v1.Pod, container *v1.Container) error {
+	m.Lock()
+	defer m.Unlock()
+	key := numaPlacementKey(pod, container)
+	if !m.numaPlacementAllocations[key] {
+		return nil
+	}
+	if err := m.policyRemoveContainerByRef(logger, string(pod.UID), container.Name); err != nil {
+		return err
+	}
+	delete(m.numaPlacementAllocations, key)
 	return nil
 }
 
@@ -337,6 +395,7 @@ func (m *manager) policyRemoveContainerByID(logger klog.Logger, containerID stri
 	if err == nil {
 		m.lastUpdateState.Delete(podUID, containerName)
 		m.containerMap.RemoveByContainerID(containerID)
+		delete(m.numaPlacementAllocations, podUID+"/"+containerName)
 	}
 
 	return err
@@ -347,6 +406,7 @@ func (m *manager) policyRemoveContainerByRef(logger klog.Logger, podUID string, 
 	if err == nil {
 		m.lastUpdateState.Delete(podUID, containerName)
 		m.containerMap.RemoveByContainerRef(podUID, containerName)
+		delete(m.numaPlacementAllocations, podUID+"/"+containerName)
 	}
 
 	return err

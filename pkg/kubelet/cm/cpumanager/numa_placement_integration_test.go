@@ -147,6 +147,7 @@ func TestNUMAPlacementPodWideAccounting(t *testing.T) {
 		initCPUs      []string
 		appCPUs       []string
 		sidecar       bool
+		omitted       bool
 		memoryGiB     uint64
 		wantCPUs      int
 		wantMemoryGiB uint64
@@ -155,6 +156,7 @@ func TestNUMAPlacementPodWideAccounting(t *testing.T) {
 		{name: "concurrent applications", appCPUs: []string{"1", "1"}, wantCPUs: 2, wantMemoryGiB: 2, admit: true},
 		{name: "sequential init reuse", initCPUs: []string{"2", "2"}, appCPUs: []string{"1", "1"}, wantCPUs: 2, wantMemoryGiB: 2, admit: true},
 		{name: "sidecar overlaps later init and applications", initCPUs: []string{"2", "2"}, appCPUs: []string{"1", "1"}, sidecar: true, wantCPUs: 3, wantMemoryGiB: 3, admit: true},
+		{name: "omitted field retains pod-wide allocation and reuse", initCPUs: []string{"2", "2"}, appCPUs: []string{"1", "1"}, sidecar: true, omitted: true, admit: true},
 		{name: "combined applications exceed requested node", appCPUs: []string{"4", "4"}},
 		{name: "combined memory exceeds requested node", appCPUs: []string{"1", "1", "1"}, memoryGiB: 2},
 	} {
@@ -184,7 +186,9 @@ func TestNUMAPlacementPodWideAccounting(t *testing.T) {
 			scope.AddHintProvider(logger, &placementMemoryProvider{policy: memoryPolicy, state: memoryState})
 			pod := makePod("pod-wide-"+tc.name, "app-0", tc.appCPUs[0], tc.appCPUs[0])
 			node := int32(1)
-			pod.Spec.NUMANode = &node
+			if !tc.omitted {
+				pod.Spec.NUMANode = &node
+			}
 			for i, amount := range tc.appCPUs[1:] {
 				container := makePod("unused", "app-"+string(rune('1'+i)), amount, amount).Spec.Containers[0]
 				pod.Spec.Containers = append(pod.Spec.Containers, container)
@@ -211,19 +215,21 @@ func TestNUMAPlacementPodWideAccounting(t *testing.T) {
 			}
 			for _, container := range append(pod.Spec.InitContainers, pod.Spec.Containers...) {
 				cpus, ok := cpuState.GetCPUSet(string(pod.UID), container.Name)
-				if !ok || cpus.IsEmpty() || !cpus.IsSubsetOf(topoDualSocketHT.CPUDetails.CPUsInNUMANodes(1)) {
+				if !ok || cpus.IsEmpty() || !tc.omitted && !cpus.IsSubsetOf(topoDualSocketHT.CPUDetails.CPUsInNUMANodes(1)) {
 					t.Fatalf("%s CPUs = %s, want requested node", container.Name, cpus)
 				}
 				blocks := memoryState.GetMemoryBlocks(string(pod.UID), container.Name)
-				if len(blocks) != 1 || len(blocks[0].NUMAAffinity) != 1 || blocks[0].NUMAAffinity[0] != 1 {
+				if len(blocks) != 1 || len(blocks[0].NUMAAffinity) != 1 || !tc.omitted && blocks[0].NUMAAffinity[0] != 1 {
 					t.Fatalf("%s memory blocks = %+v, want requested node", container.Name, blocks)
 				}
 			}
-			if used := initialCPUs.Difference(cpuState.GetDefaultCPUSet()).Size(); used != tc.wantCPUs {
-				t.Fatalf("reserved CPUs = %d, want %d", used, tc.wantCPUs)
-			}
-			if free := memoryState.GetMachineState()[1].MemoryMap[v1.ResourceMemory].Free; free != requestedNodeMemory-tc.wantMemoryGiB*1000*1000*1000 {
-				t.Fatalf("free memory = %d, want %d", free, requestedNodeMemory-tc.wantMemoryGiB*1000*1000*1000)
+			if !tc.omitted {
+				if used := initialCPUs.Difference(cpuState.GetDefaultCPUSet()).Size(); used != tc.wantCPUs {
+					t.Fatalf("reserved CPUs = %d, want %d", used, tc.wantCPUs)
+				}
+				if free := memoryState.GetMachineState()[1].MemoryMap[v1.ResourceMemory].Free; free != requestedNodeMemory-tc.wantMemoryGiB*1000*1000*1000 {
+					t.Fatalf("free memory = %d, want %d", free, requestedNodeMemory-tc.wantMemoryGiB*1000*1000*1000)
+				}
 			}
 			for _, container := range append(pod.Spec.InitContainers, pod.Spec.Containers...) {
 				if err := cpuPolicy.RemoveContainer(logger, cpuState, string(pod.UID), container.Name); err != nil {

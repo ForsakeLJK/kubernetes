@@ -36,6 +36,7 @@ type numaPlacementTestProvider struct {
 	allocated     bool
 	released      bool
 	assignments   map[string]bool
+	restored      bool
 }
 
 func (p *numaPlacementTestProvider) Allocate(_ context.Context, _ *v1.Pod, container *v1.Container, _ lifecycle.Operation) error {
@@ -61,6 +62,37 @@ func (p *numaPlacementTestProvider) NUMAPlacementAllocated(_ *v1.Pod, container 
 		return p.assignments[container.Name]
 	}
 	return p.allocated
+}
+
+func (p *numaPlacementTestProvider) HasRestoredNUMAPlacement(*v1.Pod) bool { return p.restored }
+
+func TestRequestedNUMAPlacementRepeatedRecovery(t *testing.T) {
+	logger, ctx := ktesting.NewTestContext(t)
+	node := int32(2)
+	restart := v1.ContainerRestartPolicyAlways
+	pod := &v1.Pod{Spec: v1.PodSpec{NUMANode: &node, InitContainers: []v1.Container{{Name: "init"}, {Name: "sidecar", RestartPolicy: &restart}}, Containers: []v1.Container{{Name: "app"}}}}
+	s := NewPodScope(NewSingleNumaNodePolicy(&NUMAInfo{Nodes: []int{0, 2}}, PolicyOptions{})).(*podScope)
+	staleHints := []TopologyHint{{NUMANodeAffinity: NewTestBitMask(0), Preferred: true}}
+	cpu := &numaPlacementTestProvider{mockHintProvider: mockHintProvider{th: map[string][]TopologyHint{"cpu": staleHints}}, assignments: map[string]bool{"init": true, "sidecar": true}, restored: true}
+	memory := &numaPlacementTestProvider{mockHintProvider: mockHintProvider{th: map[string][]TopologyHint{"memory": staleHints, "hugepages-2Mi": staleHints}}, assignments: map[string]bool{"init": true, "sidecar": true}, restored: true, failContainer: "app", allocateError: errors.New("injected recovery failure")}
+	s.AddHintProvider(logger, cpu)
+	s.AddHintProvider(logger, memory)
+	for attempt := 0; attempt < 2; attempt++ {
+		result := s.Admit(ctx, pod, lifecycle.AddOperation)
+		if result.Admit || !strings.Contains(result.Message, "injected recovery failure") {
+			t.Fatalf("recovery attempt %d = %+v", attempt, result)
+		}
+		if !reflect.DeepEqual(cpu.assignments, map[string]bool{"init": true, "sidecar": true}) || !reflect.DeepEqual(memory.assignments, map[string]bool{"init": true, "sidecar": true}) {
+			t.Fatalf("recovery attempt %d modified checkpoint assignments: cpu=%v memory=%v", attempt, cpu.assignments, memory.assignments)
+		}
+	}
+	memory.allocateError = nil
+	if result := s.Admit(ctx, pod, lifecycle.AddOperation); !result.Admit {
+		t.Fatalf("matching assignments could not be reused: %+v", result)
+	}
+	if !cpu.assignments["init"] || !cpu.assignments["sidecar"] || !cpu.assignments["app"] || !memory.assignments["init"] || !memory.assignments["sidecar"] || !memory.assignments["app"] {
+		t.Fatalf("recovery did not retain and complete assignments: cpu=%v memory=%v", cpu.assignments, memory.assignments)
+	}
 }
 
 func TestRequestedNUMAPlacementRollsBackWholePod(t *testing.T) {

@@ -4,7 +4,7 @@
 
 **Blocked by:** 03 — Extend placement to application containers, init containers, and sidecars; 04 — Confine requested hugepages to the selected NUMA node.
 
-**Status:** ready-for-agent
+**Status:** resolved
 
 **Type:** task
 
@@ -22,3 +22,9 @@
 ## Comments
 
 Approved ticket breakdown: slice 05 of 06. Both Pod-wide and hugepage support are prerequisites so recovery covers the complete supported resource model.
+
+## Answer
+
+Recovered CPU sets and ordinary-memory and hugepage blocks are checked against the Pod's immutable requested node and resource declarations before reuse or container creation. Pod admission disregards resource-manager capacity hints that include already checkpointed reservations; concrete validation and allocation still enforce placement, while device hints retain their existing decision. Failed admissions restore the prior assignments and release only newly acquired resources. The temporary restored-assignment refusals are removed; resize remains refused.
+
+Automated verification: the container-manager test tree passed with a short temporary path. On the final run, the unrelated `TestDevicePluginReRegistrationProbeMode` failed in isolation on this macOS host; the tree passed with that test excluded. Checkpoint reopen, assignment reuse, restart validation, conflicting assignments, hugepages, init containers, sidecars, and repeated failed recovery are covered. The Linux runtime-mask test compiled with `GOOS=linux GOARCH=arm64 go test -c ./pkg/kubelet/cm`; it could not execute on this macOS host. Linux multi-NUMA runtime acceptance remains for ticket 06.

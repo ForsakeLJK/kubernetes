@@ -290,16 +290,19 @@ func (m *manager) Allocate(ctx context.Context, pod *v1.Pod, container *v1.Conta
 
 	m.Lock()
 	defer m.Unlock()
-	if pod.Spec.NUMANode != nil && m.state.GetMemoryBlocks(string(pod.UID), container.Name) != nil && !m.numaPlacementAllocations[numaPlacementKey(pod, container)] {
-		return fmt.Errorf("memory checkpoint assignment for requested NUMA node %d cannot be reused until restored placement is supported", *pod.Spec.NUMANode)
+	if pod.Spec.NUMANode != nil {
+		if err := m.checkNUMAPlacement(pod, container); err != nil {
+			return err
+		}
 	}
+	existed := m.state.GetMemoryBlocks(string(pod.UID), container.Name) != nil
 
 	// Call down into the policy to assign this container memory if required.
 	if err := m.policy.Allocate(ctx, m.state, pod, container, operation); err != nil {
 		logger.Error(err, "Allocate error", "pod", klog.KObj(pod), "containerName", container.Name)
 		return err
 	}
-	if pod.Spec.NUMANode != nil {
+	if pod.Spec.NUMANode != nil && !existed {
 		if m.numaPlacementAllocations == nil {
 			m.numaPlacementAllocations = make(map[string]bool)
 		}
@@ -315,8 +318,38 @@ func numaPlacementKey(pod *v1.Pod, container *v1.Container) string {
 func (m *manager) CheckNUMAPlacement(pod *v1.Pod, container *v1.Container) error {
 	m.Lock()
 	defer m.Unlock()
-	if m.state.GetMemoryBlocks(string(pod.UID), container.Name) != nil && !m.numaPlacementAllocations[numaPlacementKey(pod, container)] {
-		return fmt.Errorf("memory checkpoint assignment for requested NUMA node %d cannot be reused until restored placement is supported", *pod.Spec.NUMANode)
+	return m.checkNUMAPlacement(pod, container)
+}
+
+func (m *manager) checkNUMAPlacement(pod *v1.Pod, container *v1.Container) error {
+	blocks := m.state.GetMemoryBlocks(string(pod.UID), container.Name)
+	if blocks == nil {
+		return nil
+	}
+	if len(blocks) == 0 {
+		return fmt.Errorf("memory assignment conflicts with requested NUMA node %d: no memory blocks", *pod.Spec.NUMANode)
+	}
+	requested, err := getContainerRequestedResources(klog.Background(), pod, container)
+	if err != nil {
+		return fmt.Errorf("memory assignment for requested NUMA node %d: %w", *pod.Spec.NUMANode, err)
+	}
+	seen := make(map[v1.ResourceName]bool, len(blocks))
+	for _, block := range blocks {
+		if len(block.NUMAAffinity) != 1 || block.NUMAAffinity[0] != int(*pod.Spec.NUMANode) {
+			return fmt.Errorf("%s assignment conflicts with requested NUMA node %d: assigned nodes %v", block.Type, *pod.Spec.NUMANode, block.NUMAAffinity)
+		}
+		if len(requested) > 0 {
+			amount, ok := requested[block.Type]
+			if !ok || seen[block.Type] || block.Size > amount || !isRegularInitContainer(pod, container) && block.Size != amount {
+				return fmt.Errorf("%s assignment conflicts with requested NUMA node %d: assigned %d bytes, requested %d", block.Type, *pod.Spec.NUMANode, block.Size, amount)
+			}
+			seen[block.Type] = true
+		}
+	}
+	for resourceName := range requested {
+		if !seen[resourceName] {
+			return fmt.Errorf("%s assignment is missing for requested NUMA node %d", resourceName, *pod.Spec.NUMANode)
+		}
 	}
 	return nil
 }
@@ -325,6 +358,17 @@ func (m *manager) NUMAPlacementAllocated(pod *v1.Pod, container *v1.Container) b
 	m.Lock()
 	defer m.Unlock()
 	return m.numaPlacementAllocations[numaPlacementKey(pod, container)]
+}
+
+func (m *manager) HasRestoredNUMAPlacement(pod *v1.Pod) bool {
+	m.Lock()
+	defer m.Unlock()
+	for _, container := range append(pod.Spec.InitContainers, pod.Spec.Containers...) {
+		if m.state.GetMemoryBlocks(string(pod.UID), container.Name) != nil && !m.numaPlacementAllocations[numaPlacementKey(pod, &container)] {
+			return true
+		}
+	}
+	return false
 }
 
 // SnapshotNUMAPlacement restores memory accounting and init-container reuse when
@@ -424,19 +468,11 @@ func numaPlacementMemoryTotals(assignments map[string][]state.Block, requestedNo
 func (m *manager) ValidateNUMAPlacement(pod *v1.Pod, container *v1.Container) error {
 	m.Lock()
 	defer m.Unlock()
-	if !m.numaPlacementAllocations[numaPlacementKey(pod, container)] {
-		return fmt.Errorf("memory allocation for requested NUMA node %d is unavailable or restored", *pod.Spec.NUMANode)
-	}
 	blocks := m.state.GetMemoryBlocks(string(pod.UID), container.Name)
 	if len(blocks) == 0 {
 		return fmt.Errorf("memory allocation for requested NUMA node %d is missing", *pod.Spec.NUMANode)
 	}
-	for _, block := range blocks {
-		if len(block.NUMAAffinity) != 1 || block.NUMAAffinity[0] != int(*pod.Spec.NUMANode) {
-			return fmt.Errorf("memory allocation is not confined to requested NUMA node %d", *pod.Spec.NUMANode)
-		}
-	}
-	return nil
+	return m.checkNUMAPlacement(pod, container)
 }
 
 func (m *manager) ReleaseNUMAPlacement(logger klog.Logger, pod *v1.Pod, container *v1.Container) error {

@@ -69,7 +69,7 @@ func (s *podScope) admitUsingContainerResources(ctx context.Context, pod *v1.Pod
 	var admit bool
 	if pod.Spec.NUMANode != nil {
 		if operation != lifecycle.AddOperation {
-			return admission.GetPodAdmitResult(numaPlacementError{fmt.Sprintf("NUMA node %d supports only new container allocation", *pod.Spec.NUMANode)})
+			return admission.GetPodAdmitResult(numaPlacementError{fmt.Sprintf("NUMA node %d does not support in-place resource resize; replace the Pod", *pod.Spec.NUMANode)})
 		}
 		for _, container := range append(pod.Spec.InitContainers, pod.Spec.Containers...) {
 			for _, provider := range s.hintProviders {
@@ -142,9 +142,18 @@ func (s *podScope) requestedAffinity(logger klog.Logger, pod *v1.Pod, operation 
 	providersHints := s.accumulateProvidersHints(logger, pod, operation)
 	for providerIndex, resources := range providersHints {
 		filteredResources := make(map[string][]TopologyHint, len(resources))
+		restored := false
+		if checker, ok := s.hintProviders[providerIndex].(interface{ HasRestoredNUMAPlacement(*v1.Pod) bool }); ok {
+			restored = checker.HasRestoredNUMAPlacement(pod)
+		}
 		for name, hints := range resources {
 			var matching []TopologyHint
 			resourceRequired := name == string(v1.ResourceCPU) || name == string(v1.ResourceMemory) || corehelper.IsHugePageResourceName(v1.ResourceName(name))
+			if restored && resourceRequired {
+				// Concrete assignments and each subsequent allocation are checked by the resource managers.
+				// Pod-level hints include already reserved resources after recovery.
+				continue
+			}
 			for _, hint := range hints {
 				if resourceRequired && hint.NUMANodeAffinity != nil && hint.NUMANodeAffinity.IsEqual(mask) ||
 					!resourceRequired && (hint.NUMANodeAffinity == nil || hint.NUMANodeAffinity.IsSet(id)) {

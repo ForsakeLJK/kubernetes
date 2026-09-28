@@ -22,7 +22,10 @@ import (
 	"testing"
 
 	v1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog/v2"
+	"k8s.io/kubernetes/pkg/kubelet/cm/containermap"
 	cpustate "k8s.io/kubernetes/pkg/kubelet/cm/cpumanager/state"
 	"k8s.io/kubernetes/pkg/kubelet/cm/memorymanager"
 	memorystate "k8s.io/kubernetes/pkg/kubelet/cm/memorymanager/state"
@@ -121,7 +124,7 @@ func TestNUMAPlacementRollsBackConcreteCPUAssignmentOnMemoryFailure(t *testing.T
 	}
 }
 
-func TestNUMAPlacementRefusesRestoredCPUAssignment(t *testing.T) {
+func TestNUMAPlacementRestoredCPUAssignment(t *testing.T) {
 	node := int32(1)
 	pod := makePod("restored-pod", "app", "1000m", "1000m")
 	pod.Spec.NUMANode = &node
@@ -129,14 +132,96 @@ func TestNUMAPlacementRefusesRestoredCPUAssignment(t *testing.T) {
 	state := &mockState{assignments: cpustate.ContainerCPUAssignments{string(pod.UID): {"app": assigned}}}
 	m := &manager{state: state, topology: topoDualSocketHT}
 	container := &pod.Spec.Containers[0]
-	if err := m.CheckNUMAPlacement(pod, container); err == nil || !strings.Contains(err.Error(), "checkpoint") {
-		t.Fatalf("restored assignment was not refused: %v", err)
+	if err := m.CheckNUMAPlacement(pod, container); err != nil {
+		t.Fatalf("matching restored assignment was refused: %v", err)
 	}
-	if err := m.ValidateNUMAPlacement(pod, container); err == nil {
-		t.Fatal("restored assignment could reach runtime configuration")
+	if err := m.ValidateNUMAPlacement(pod, container); err != nil {
+		t.Fatalf("matching restored assignment could not reach runtime configuration: %v", err)
 	}
 	if actual, exists := state.GetCPUSet(string(pod.UID), container.Name); !exists || !actual.Equals(assigned) {
 		t.Fatalf("restored CPUs were modified: %s", actual)
+	}
+	state.SetCPUSet(string(pod.UID), container.Name, cpuset.New(0))
+	if err := m.CheckNUMAPlacement(pod, container); err == nil || !strings.Contains(err.Error(), "NUMA node 1") {
+		t.Fatalf("conflicting restored assignment was accepted: %v", err)
+	}
+	if err := m.ValidateNUMAPlacement(pod, container); err == nil {
+		t.Fatal("conflicting restored assignment could reach runtime configuration")
+	}
+	state.SetCPUSet(string(pod.UID), container.Name, cpuset.New(1, 3))
+	if err := m.CheckNUMAPlacement(pod, container); err == nil || !strings.Contains(err.Error(), "assigned 2 CPUs") {
+		t.Fatalf("wrong-sized restored CPU assignment was accepted: %v", err)
+	}
+}
+
+func TestNUMAPlacementCPUCheckpointRecovery(t *testing.T) {
+	logger, ctx := ktesting.NewTestContext(t)
+	node := int32(1)
+	restart := v1.ContainerRestartPolicyAlways
+	makeContainer := func(name string) v1.Container {
+		return makePod("unused", name, "1000m", "1000m").Spec.Containers[0]
+	}
+	sidecar := makeContainer("sidecar")
+	sidecar.RestartPolicy = &restart
+	pod := &v1.Pod{ObjectMeta: metav1.ObjectMeta{UID: types.UID("cpu-checkpoint-pod")}, Spec: v1.PodSpec{
+		NUMANode: &node, InitContainers: []v1.Container{makeContainer("init"), sidecar}, Containers: []v1.Container{makeContainer("app")},
+	}}
+	directory := t.TempDir()
+	checkpoint, err := cpustate.NewCheckpointState(logger, directory, "numa-cpu", "static", containermap.NewContainerMap())
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpoint.SetDefaultCPUSet(cpuset.New(0, 2, 4, 6, 7, 8, 9, 10, 11))
+	for name, cpu := range map[string]int{"init": 1, "sidecar": 3, "app": 5} {
+		checkpoint.SetCPUSet(string(pod.UID), name, cpuset.New(cpu))
+	}
+	restored, err := cpustate.NewCheckpointState(logger, directory, "numa-cpu", "static", containermap.NewContainerMap())
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err := NewStaticPolicy(logger, topoDualSocketHT, 1, cpuset.New(), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := &manager{state: restored, topology: topoDualSocketHT, policy: policy, sourcesReady: &sourcesReadyStub{}, activePods: func() []*v1.Pod { return []*v1.Pod{pod} }, containerMap: containermap.NewContainerMap()}
+	if !m.HasRestoredNUMAPlacement(pod) {
+		t.Fatal("restored checkpoint was not identified")
+	}
+	for _, container := range append(pod.Spec.InitContainers, pod.Spec.Containers...) {
+		if err := m.CheckNUMAPlacement(pod, &container); err != nil {
+			t.Fatalf("%s checkpoint admission: %v", container.Name, err)
+		}
+		before, _ := restored.GetCPUSet(string(pod.UID), container.Name)
+		if err := m.Allocate(ctx, pod, &container, lifecycle.AddOperation); err != nil {
+			t.Fatalf("%s checkpoint reuse: %v", container.Name, err)
+		}
+		if after, ok := restored.GetCPUSet(string(pod.UID), container.Name); !ok || !after.Equals(before) {
+			t.Fatalf("%s checkpoint CPUs moved: before=%s after=%s", container.Name, before, after)
+		}
+		if err := m.ValidateNUMAPlacement(pod, &container); err != nil {
+			t.Fatalf("%s checkpoint restart: %v", container.Name, err)
+		}
+	}
+	if !restored.GetDefaultCPUSet().Equals(cpuset.New(0, 2, 4, 6, 7, 8, 9, 10, 11)) {
+		t.Fatalf("recovery reserved CPUs twice: default=%s", restored.GetDefaultCPUSet())
+	}
+	restored.SetCPUSet(string(pod.UID), "sidecar", cpuset.New(0))
+	if err := m.CheckNUMAPlacement(pod, &pod.Spec.InitContainers[1]); err == nil || !strings.Contains(err.Error(), "NUMA node 1") {
+		t.Fatalf("conflicting sidecar checkpoint was accepted: %v", err)
+	}
+	if err := m.Allocate(ctx, pod, &pod.Spec.InitContainers[1], lifecycle.AddOperation); err == nil {
+		t.Fatal("conflicting sidecar checkpoint was reallocated")
+	}
+	if err := m.ValidateNUMAPlacement(pod, &pod.Spec.InitContainers[1]); err == nil {
+		t.Fatal("conflicting sidecar checkpoint could start")
+	}
+	if assigned, _ := restored.GetCPUSet(string(pod.UID), "sidecar"); !assigned.Equals(cpuset.New(0)) {
+		t.Fatalf("conflicting sidecar checkpoint was repaired: %s", assigned)
+	}
+	for _, container := range []v1.Container{pod.Spec.InitContainers[0], pod.Spec.Containers[0]} {
+		if err := m.ValidateNUMAPlacement(pod, &container); err != nil {
+			t.Fatalf("valid %s checkpoint changed after conflict: %v", container.Name, err)
+		}
 	}
 }
 
@@ -264,7 +349,7 @@ func TestNUMAPlacementRollbackPreservesOtherPodCPUs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := &manager{state: state, policy: policy, numaPlacementAllocations: map[string]bool{numaPlacementKey(pod, &pod.Spec.InitContainers[0]): true}}
+	m := &manager{state: state, policy: policy, topology: topoDualSocketHT, numaPlacementAllocations: map[string]bool{}}
 	rollback := m.SnapshotNUMAPlacement(pod, &pod.Spec.Containers[0])
 	state.SetCPUSet(string(pod.UID), "app", cpuset.New(5))
 	state.SetCPUSet("other-pod", "app", cpuset.New(3))
@@ -275,6 +360,9 @@ func TestNUMAPlacementRollbackPreservesOtherPodCPUs(t *testing.T) {
 	}
 	if _, exists := state.GetCPUSet(string(pod.UID), "app"); exists {
 		t.Fatal("new application assignment remained committed")
+	}
+	if restored, exists := state.GetCPUSet(string(pod.UID), "init"); !exists || !restored.Equals(cpuset.New(1)) || m.numaPlacementAllocations[numaPlacementKey(pod, &pod.Spec.InitContainers[0])] {
+		t.Fatalf("restored init assignment changed: %s", restored)
 	}
 	if actual, exists := state.GetCPUSet("other-pod", "app"); !exists || !actual.Equals(cpuset.New(3)) {
 		t.Fatalf("other pod assignment changed: %s", actual)

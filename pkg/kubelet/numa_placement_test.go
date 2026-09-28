@@ -52,8 +52,8 @@ func TestNUMAPlacementAdmission(t *testing.T) {
 		singleContainer bool
 	}{
 		{name: "omitted", goos: "windows", want: ""},
-		{name: "zero exists", id: numaTestID(0), goos: "linux", config: config, want: "NUMAPlacementNotImplemented"},
-		{name: "noncontiguous ID exists", id: numaTestID(2), goos: "linux", config: config, want: "NUMAPlacementNotImplemented"},
+		{name: "zero exists", id: numaTestID(0), goos: "linux", config: config},
+		{name: "noncontiguous ID exists", id: numaTestID(2), goos: "linux", config: config},
 		{name: "hole does not exist", id: numaTestID(1), goos: "linux", config: config, want: "NUMANodeNotFound"},
 		{name: "unsupported CPU policy", id: numaTestID(0), goos: "linux", config: withoutPolicy(func(c *cm.NodeConfig) { c.CPUManagerPolicy = "none" }), want: "NUMAPlacementUnsupported"},
 		{name: "unsupported memory policy", id: numaTestID(0), goos: "linux", config: withoutPolicy(func(c *cm.NodeConfig) { c.MemoryManagerPolicy = "None" }), want: "NUMAPlacementUnsupported"},
@@ -90,27 +90,29 @@ func TestNUMAPlacementAdmission(t *testing.T) {
 
 func numaTestID(id int32) *int32 { return &id }
 
-func TestNUMAPlacementUnsupportedWorkloads(t *testing.T) {
+func TestNUMAPlacementAdmitsHugepageWorkloads(t *testing.T) {
 	config := cm.NodeConfig{CPUManagerPolicy: "static", MemoryManagerPolicy: "Static", TopologyManagerPolicy: "single-numa-node", TopologyManagerScope: "pod"}
 	h := &numaPlacementAdmitHandler{goos: "linux", config: config, getMachineInfo: func() (*cadvisorapi.MachineInfo, error) {
 		return &cadvisorapi.MachineInfo{Topology: []cadvisorapi.Node{{Id: 0}}}, nil
 	}}
 	hugepages := v1.ResourceName(v1.ResourceHugePagesPrefix + "2Mi")
+	hugepageResources := v1.ResourceList{
+		v1.ResourceCPU: resource.MustParse("1"), v1.ResourceMemory: resource.MustParse("1Gi"), hugepages: resource.MustParse("2Mi"),
+	}
 	for _, tc := range []struct {
 		name string
 		spec v1.PodSpec
 	}{
 		{name: "multiple applications", spec: v1.PodSpec{Containers: []v1.Container{{Name: "one"}, {Name: "two"}}}},
 		{name: "init container", spec: v1.PodSpec{Containers: []v1.Container{{Name: "app"}}, InitContainers: []v1.Container{{Name: "init"}}}},
-		{name: "hugepages", spec: v1.PodSpec{Containers: []v1.Container{{Name: "app", Resources: v1.ResourceRequirements{Limits: v1.ResourceList{hugepages: resource.MustParse("2Mi")}}}}}},
+		{name: "hugepages", spec: v1.PodSpec{Containers: []v1.Container{{Name: "app", Resources: v1.ResourceRequirements{Requests: hugepageResources, Limits: hugepageResources}}}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pod := &v1.Pod{Spec: tc.spec}
 			pod.Spec.NUMANode = numaTestID(0)
 			result := h.Admit(context.Background(), &lifecycle.PodAdmitAttributes{Pod: pod})
-			wantAdmit := tc.name != "hugepages"
-			if result.Admit != wantAdmit || !wantAdmit && result.Reason != "NUMAPlacementNotImplemented" {
-				t.Fatalf("workload admission = %+v, want admit %t", result, wantAdmit)
+			if !result.Admit {
+				t.Fatalf("workload admission = %+v, want admission", result)
 			}
 		})
 	}

@@ -158,6 +158,39 @@ func TestRequestedNUMAPlacement(t *testing.T) {
 	}
 }
 
+func TestRequestedNUMAHugepageHints(t *testing.T) {
+	logger, ctx := ktesting.NewTestContext(t)
+	info := &NUMAInfo{Nodes: []int{0, 2}, NUMADistances: NUMADistances{0: {10, 20}, 2: {20, 10}}}
+	node := int32(2)
+	pageName := "hugepages-2Mi"
+	for _, tc := range []struct {
+		name  string
+		hints []TopologyHint
+		fail  bool
+	}{
+		{name: "local hugepages available", hints: []TopologyHint{{NUMANodeAffinity: NewTestBitMask(0), Preferred: true}, {NUMANodeAffinity: NewTestBitMask(2), Preferred: false}}},
+		{name: "hugepages only elsewhere", hints: []TopologyHint{{NUMANodeAffinity: NewTestBitMask(0), Preferred: true}}, fail: true},
+		{name: "hugepages exhausted", hints: []TopologyHint{}, fail: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pod := &v1.Pod{Spec: v1.PodSpec{NUMANode: &node, Containers: []v1.Container{{Name: "app"}}}}
+			s := NewPodScope(NewSingleNumaNodePolicy(info, PolicyOptions{})).(*podScope)
+			s.AddHintProvider(logger, &numaPlacementTestProvider{mockHintProvider: mockHintProvider{th: map[string][]TopologyHint{"cpu": {{NUMANodeAffinity: NewTestBitMask(2), Preferred: true}}}}})
+			s.AddHintProvider(logger, &numaPlacementTestProvider{mockHintProvider: mockHintProvider{th: map[string][]TopologyHint{"memory": {{NUMANodeAffinity: NewTestBitMask(2), Preferred: true}}, pageName: tc.hints}}})
+			result := s.Admit(ctx, pod, lifecycle.AddOperation)
+			if tc.fail {
+				if result.Admit || result.Reason != "NUMAPlacementFailed" || !strings.Contains(result.Message, pageName) || !strings.Contains(result.Message, "NUMA node 2") {
+					t.Fatalf("admission = %+v, want local %s shortage", result, pageName)
+				}
+				return
+			}
+			if !result.Admit || !s.GetAffinity(logger, string(pod.UID), "app").NUMANodeAffinity.IsEqual(NewTestBitMask(2)) {
+				t.Fatalf("hugepage hint changed requested affinity: %+v", result)
+			}
+		})
+	}
+}
+
 func TestPodCalculateAffinity(t *testing.T) {
 	tcases := []struct {
 		name     string

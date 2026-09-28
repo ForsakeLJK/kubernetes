@@ -59,32 +59,59 @@ func TestNUMAPlacementRollbackRestoresInitReuse(t *testing.T) {
 	}}
 	const gib = uint64(1024 * 1024 * 1024)
 	memoryState := state.NewMemoryState(logger)
-	memoryState.SetMachineState(state.NUMANodeMap{2: {MemoryMap: map[v1.ResourceName]*state.MemoryTable{v1.ResourceMemory: {TotalMemSize: 2 * gib, Allocatable: 2 * gib, Free: gib, Reserved: gib}}, NumberOfAssignments: 1}})
-	memoryState.SetMemoryBlocks(string(pod.UID), "init", []state.Block{{NUMAAffinity: []int{2}, Type: v1.ResourceMemory, Size: gib}})
-	policy := &staticPolicy{initContainersReusableMemory: map[string]map[string]map[v1.ResourceName]uint64{string(pod.UID): {"2": {v1.ResourceMemory: gib}}}}
+	hugepages := v1.ResourceName(v1.ResourceHugePagesPrefix + "1Gi")
+	memoryState.SetMachineState(state.NUMANodeMap{2: {MemoryMap: map[v1.ResourceName]*state.MemoryTable{
+		v1.ResourceMemory: {TotalMemSize: 2 * gib, Allocatable: 2 * gib, Free: gib, Reserved: gib},
+		hugepages:         {TotalMemSize: 2 * gib, Allocatable: 2 * gib, Free: gib, Reserved: gib},
+	}, NumberOfAssignments: 2}})
+	memoryState.SetMemoryBlocks(string(pod.UID), "init", []state.Block{
+		{NUMAAffinity: []int{2}, Type: v1.ResourceMemory, Size: gib},
+		{NUMAAffinity: []int{2}, Type: hugepages, Size: gib},
+	})
+	policy := &staticPolicy{initContainersReusableMemory: map[string]map[string]map[v1.ResourceName]uint64{string(pod.UID): {"2": {v1.ResourceMemory: gib, hugepages: gib}}}}
 	m := &manager{state: memoryState, policy: policy, numaPlacementAllocations: map[string]bool{numaPlacementKey(pod, &pod.Spec.InitContainers[0]): true}}
 	rollback := m.SnapshotNUMAPlacement(pod, &pod.Spec.Containers[0])
-	memoryState.SetMachineState(state.NUMANodeMap{2: {MemoryMap: map[v1.ResourceName]*state.MemoryTable{v1.ResourceMemory: {TotalMemSize: 2 * gib, Allocatable: 2 * gib, Free: 0, Reserved: 2 * gib}}, NumberOfAssignments: 2}})
-	memoryState.SetMemoryBlocks(string(pod.UID), "init", []state.Block{{NUMAAffinity: []int{2}, Type: v1.ResourceMemory, Size: 0}})
-	memoryState.SetMemoryBlocks(string(pod.UID), "app", []state.Block{{NUMAAffinity: []int{2}, Type: v1.ResourceMemory, Size: 2 * gib}})
+	memoryState.SetMachineState(state.NUMANodeMap{2: {MemoryMap: map[v1.ResourceName]*state.MemoryTable{
+		v1.ResourceMemory: {TotalMemSize: 2 * gib, Allocatable: 2 * gib, Free: 0, Reserved: 2 * gib},
+		hugepages:         {TotalMemSize: 2 * gib, Allocatable: 2 * gib, Free: 0, Reserved: 2 * gib},
+	}, NumberOfAssignments: 4}})
+	memoryState.SetMemoryBlocks(string(pod.UID), "init", []state.Block{
+		{NUMAAffinity: []int{2}, Type: v1.ResourceMemory, Size: 0},
+		{NUMAAffinity: []int{2}, Type: hugepages, Size: 0},
+	})
+	memoryState.SetMemoryBlocks(string(pod.UID), "app", []state.Block{
+		{NUMAAffinity: []int{2}, Type: v1.ResourceMemory, Size: 2 * gib},
+		{NUMAAffinity: []int{2}, Type: hugepages, Size: 2 * gib},
+	})
 	policy.initContainersReusableMemory[string(pod.UID)]["2"][v1.ResourceMemory] = 0
+	policy.initContainersReusableMemory[string(pod.UID)]["2"][hugepages] = 0
 	m.numaPlacementAllocations[numaPlacementKey(pod, &pod.Spec.Containers[0])] = true
 	if err := rollback(klog.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if blocks := memoryState.GetMemoryBlocks(string(pod.UID), "init"); len(blocks) != 1 || blocks[0].Size != gib {
+	if blocks := memoryState.GetMemoryBlocks(string(pod.UID), "init"); len(blocks) != 2 || blocks[0].Size != gib || blocks[1].Size != gib {
 		t.Fatalf("init assignment was not restored: %+v", blocks)
 	}
 	if blocks := memoryState.GetMemoryBlocks(string(pod.UID), "app"); blocks != nil {
 		t.Fatalf("new application assignment retained: %+v", blocks)
 	}
-	if nodeState := memoryState.GetMachineState()[2]; nodeState.MemoryMap[v1.ResourceMemory].Free != gib || nodeState.NumberOfAssignments != 1 {
+	if nodeState := memoryState.GetMachineState()[2]; nodeState.MemoryMap[v1.ResourceMemory].Free != gib || nodeState.MemoryMap[hugepages].Free != gib || nodeState.NumberOfAssignments != 2 {
 		t.Fatalf("node accounting was not restored: %+v", nodeState)
 	}
 	if got := policy.initContainersReusableMemory[string(pod.UID)]["2"][v1.ResourceMemory]; got != gib {
 		t.Fatalf("reusable memory = %d, want %d", got, gib)
 	}
+	if got := policy.initContainersReusableMemory[string(pod.UID)]["2"][hugepages]; got != gib {
+		t.Fatalf("reusable hugepages = %d, want %d", got, gib)
+	}
 	if m.numaPlacementAllocations[numaPlacementKey(pod, &pod.Spec.Containers[0])] {
 		t.Fatal("new application allocation remained committed")
+	}
+	policy.RemoveContainer(logger, memoryState, string(pod.UID), "init")
+	if blocks := memoryState.GetMemoryBlocks(string(pod.UID), "init"); blocks != nil {
+		t.Fatalf("normal cleanup retained init blocks: %+v", blocks)
+	}
+	if nodeState := memoryState.GetMachineState()[2]; nodeState.MemoryMap[v1.ResourceMemory].Free != 2*gib || nodeState.MemoryMap[hugepages].Free != 2*gib || nodeState.NumberOfAssignments != 0 {
+		t.Fatalf("normal cleanup did not release ordinary memory and hugepages: %+v", nodeState)
 	}
 }

@@ -2,7 +2,7 @@
 
 ## Notes
 
-Status: design questions settled; [spec](spec.md) guides implementation. Tickets 01, 02, and 03 are resolved.
+Status: design questions settled; [spec](spec.md) guides implementation. Tickets 01 through 04 are resolved.
 
 The request comes from the user's research work. No concrete motivating workload has been identified.
 
@@ -10,7 +10,8 @@ The request comes from the user's research work. No concrete motivating workload
 
 - [Ticket 01](issues/01-validate-numa-placement.md) introduced the immutable Pod NUMA requirement and temporary kubelet refusal path. Allocation and Linux runtime checks remain in later slices.
 - [Ticket 02](issues/02-enforce-single-container-placement.md) enforces CPU affinity and ordinary-memory allocation confinement for a single application container, with failure rollback. It deferred multi-container, hugepage, and restored-assignment support to later slices.
-- [Ticket 03](issues/03-enforce-pod-wide-placement.md) extends explicit placement and rollback to application, ordinary init, and restartable init containers while retaining existing init resource reuse. Hugepage and restored-assignment support remain in tickets 04 and 05.
+- [Ticket 03](issues/03-enforce-pod-wide-placement.md) extends explicit placement and rollback to application, ordinary init, and restartable init containers while retaining existing init resource reuse. Restored-assignment support remains in ticket 05.
+- [Ticket 04](issues/04-confine-hugepages.md) confines ordinary memory and each requested hugepage size to the selected NUMA node, including init and sidecar accounting and failure cleanup. Linux host verification remains in ticket 06.
 
 - A Pod can express a hard NUMA placement requirement. Refuse admission when it cannot be satisfied; do not fall back to another NUMA node (round 1, Q2).
 - The requirement covers CPU and memory placement together (round 1, Q3).

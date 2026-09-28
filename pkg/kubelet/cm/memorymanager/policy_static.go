@@ -815,13 +815,23 @@ func getPodRequestedResources(logger klog.Logger, pod *v1.Pod) (map[v1.ResourceN
 	}
 
 	reqRsrcs := make(map[v1.ResourceName]uint64)
-	for rsrcName := range reqRsrcsByAppCtrs {
+	for rsrcName, qty := range reqRsrcsByAppCtrs {
 		// Total resources requested by long-running containers.
-		reqRsrcsByLongRunningCtrs := reqRsrcsByAppCtrs[rsrcName] + reqRsrcsByRestartableInitCtrs[rsrcName]
-		reqRsrcs[rsrcName] = reqRsrcsByLongRunningCtrs
-
+		reqRsrcs[rsrcName] = qty + reqRsrcsByRestartableInitCtrs[rsrcName]
 		if reqRsrcs[rsrcName] < reqRsrcsByInitCtrs[rsrcName] {
 			reqRsrcs[rsrcName] = reqRsrcsByInitCtrs[rsrcName]
+		}
+	}
+	if pod.Spec.NUMANode != nil {
+		for rsrcName, qty := range reqRsrcsByInitCtrs {
+			if _, found := reqRsrcs[rsrcName]; !found {
+				reqRsrcs[rsrcName] = max(qty, reqRsrcsByRestartableInitCtrs[rsrcName])
+			}
+		}
+		for rsrcName, qty := range reqRsrcsByRestartableInitCtrs {
+			if _, found := reqRsrcs[rsrcName]; !found {
+				reqRsrcs[rsrcName] = qty
+			}
 		}
 	}
 	return reqRsrcs, nil
@@ -895,7 +905,24 @@ func (p *staticPolicy) GetPodTopologyHints(logger klog.Logger, s state.State, po
 	}
 
 	// the pod topology hints calculated only once for all containers, so no need to pass re-usable state
-	return p.calculateHints(s.GetMachineState(), pod, reqRsrcs)
+	machineState := s.GetMachineState()
+	if pod.Spec.NUMANode != nil {
+		node := machineState[int(*pod.Spec.NUMANode)]
+		requestedMask, err := bitmask.NewBitMask(int(*pod.Spec.NUMANode))
+		if err != nil {
+			return nil
+		}
+		for resourceName, requestedSize := range reqRsrcs {
+			if node == nil || node.MemoryMap[resourceName] == nil || node.MemoryMap[resourceName].Allocatable < requestedSize {
+				return map[string][]topologymanager.TopologyHint{string(resourceName): {}}
+			}
+			free := node.MemoryMap[resourceName].Free
+			if requestedSize > free && requestedSize-free > p.getPodReusableMemory(pod, requestedMask, resourceName) {
+				return map[string][]topologymanager.TopologyHint{string(resourceName): {}}
+			}
+		}
+	}
+	return p.calculateHints(machineState, pod, reqRsrcs)
 }
 
 // GetTopologyHints implements the topologymanager.HintProvider Interface
@@ -986,12 +1013,16 @@ func (p *staticPolicy) calculateHints(machineState state.NUMANodeMap, pod *v1.Po
 				if _, ok := totalFreeSize[resourceName]; !ok {
 					totalFreeSize[resourceName] = 0
 				}
-				totalFreeSize[resourceName] += machineState[nodeID].MemoryMap[resourceName].Free
+				memory := machineState[nodeID].MemoryMap[resourceName]
+				if memory == nil {
+					return
+				}
+				totalFreeSize[resourceName] += memory.Free
 
 				if _, ok := totalAllocatableSize[resourceName]; !ok {
 					totalAllocatableSize[resourceName] = 0
 				}
-				totalAllocatableSize[resourceName] += machineState[nodeID].MemoryMap[resourceName].Allocatable
+				totalAllocatableSize[resourceName] += memory.Allocatable
 			}
 		}
 

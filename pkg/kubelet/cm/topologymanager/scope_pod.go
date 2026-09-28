@@ -24,6 +24,7 @@ import (
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	resourcehelper "k8s.io/component-helpers/resource"
 	"k8s.io/klog/v2"
+	corehelper "k8s.io/kubernetes/pkg/apis/core/v1/helper"
 	"k8s.io/kubernetes/pkg/features"
 	"k8s.io/kubernetes/pkg/kubelet/cm/admission"
 	"k8s.io/kubernetes/pkg/kubelet/cm/containermap"
@@ -143,7 +144,7 @@ func (s *podScope) requestedAffinity(logger klog.Logger, pod *v1.Pod, operation 
 		filteredResources := make(map[string][]TopologyHint, len(resources))
 		for name, hints := range resources {
 			var matching []TopologyHint
-			resourceRequired := name == string(v1.ResourceCPU) || name == string(v1.ResourceMemory)
+			resourceRequired := name == string(v1.ResourceCPU) || name == string(v1.ResourceMemory) || corehelper.IsHugePageResourceName(v1.ResourceName(name))
 			for _, hint := range hints {
 				if resourceRequired && hint.NUMANodeAffinity != nil && hint.NUMANodeAffinity.IsEqual(mask) ||
 					!resourceRequired && (hint.NUMANodeAffinity == nil || hint.NUMANodeAffinity.IsSet(id)) {
@@ -159,6 +160,9 @@ func (s *podScope) requestedAffinity(logger klog.Logger, pod *v1.Pod, operation 
 				}
 				if name == string(v1.ResourceCPU) {
 					return TopologyHint{}, numaPlacementError{fmt.Sprintf("NUMA node %d has insufficient eligible CPUs or incompatible CPU topology", id)}
+				}
+				if corehelper.IsHugePageResourceName(v1.ResourceName(name)) {
+					return TopologyHint{}, numaPlacementError{fmt.Sprintf("NUMA node %d has insufficient %s capacity or incompatible memory topology", id, name)}
 				}
 				return TopologyHint{}, numaPlacementError{fmt.Sprintf("NUMA node %d has insufficient ordinary memory or incompatible memory topology", id)}
 			}

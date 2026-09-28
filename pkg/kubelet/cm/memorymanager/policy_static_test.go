@@ -1288,6 +1288,242 @@ func TestStaticPolicyRequestedNUMAMemoryAllocation(t *testing.T) {
 	}
 }
 
+func TestStaticPolicyRequestedNUMAHugepages(t *testing.T) {
+	logger, ctx := ktesting.NewTestContext(t)
+	nodeID := int32(2)
+	pages2Mi := v1.ResourceName(v1.ResourceHugePagesPrefix + "2Mi")
+	resources := v1.ResourceList{
+		v1.ResourceCPU:    resource.MustParse("1"),
+		v1.ResourceMemory: resource.MustParse("1Gi"),
+		hugepages1Gi:      resource.MustParse("1Gi"),
+		pages2Mi:          resource.MustParse("4Mi"),
+	}
+	pod := &v1.Pod{ObjectMeta: metav1.ObjectMeta{UID: types.UID("hugepage-pod")}, Spec: v1.PodSpec{
+		NUMANode: &nodeID,
+		Containers: []v1.Container{{Name: "app", Resources: v1.ResourceRequirements{
+			Requests: resources, Limits: resources,
+		}}},
+	}}
+	for _, tc := range []struct {
+		name         string
+		shortage     v1.ResourceName
+		wantResource v1.ResourceName
+		omitted      bool
+	}{
+		{name: "both page sizes and ordinary memory fit"},
+		{name: "omitted field retains hugepage placement", omitted: true},
+		{name: "ordinary memory shortage", shortage: v1.ResourceMemory, wantResource: v1.ResourceMemory},
+		{name: "one GiB page shortage", shortage: hugepages1Gi, wantResource: hugepages1Gi},
+		{name: "two MiB page shortage", shortage: pages2Mi, wantResource: pages2Mi},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stateForNode := func() *state.NUMANodeState {
+				return &state.NUMANodeState{MemoryMap: map[v1.ResourceName]*state.MemoryTable{
+					v1.ResourceMemory: {Allocatable: 2 * gb, Free: 2 * gb, TotalMemSize: 2 * gb},
+					hugepages1Gi:      {Allocatable: 2 * gb, Free: 2 * gb, TotalMemSize: 2 * gb},
+					pages2Mi:          {Allocatable: 8 * mb, Free: 8 * mb, TotalMemSize: 8 * mb},
+				}}
+			}
+			other := stateForNode()
+			selected := stateForNode()
+			if tc.shortage != "" {
+				selected.MemoryMap[tc.shortage].Free = 0
+			}
+			casePod := pod.DeepCopy()
+			hint := &topologymanager.TopologyHint{NUMANodeAffinity: newNUMAAffinity(2), Preferred: true}
+			if tc.omitted {
+				casePod.Spec.NUMANode = nil
+				hint = nil
+			}
+			testCase := testStaticPolicy{
+				pod:            casePod,
+				machineState:   state.NUMANodeMap{0: other, 2: selected},
+				systemReserved: systemReservedMemory{0: {v1.ResourceMemory: 512 * mb}},
+			}
+			policy, memoryState, err := initTests(t, &testCase, hint, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			hints := policy.GetPodTopologyHints(logger, memoryState, casePod, lifecycle.AddOperation)
+			if tc.wantResource != "" {
+				if got, exists := hints[string(tc.wantResource)]; !exists || len(got) != 0 {
+					t.Fatalf("shortage hints = %v, want empty %s hints", hints, tc.wantResource)
+				}
+			} else {
+				for _, name := range []v1.ResourceName{v1.ResourceMemory, hugepages1Gi, pages2Mi} {
+					if len(hints[string(name)]) == 0 {
+						t.Fatalf("missing local hint for %s: %v", name, hints)
+					}
+				}
+			}
+			err = policy.Allocate(ctx, memoryState, casePod, &casePod.Spec.Containers[0], lifecycle.AddOperation)
+			if tc.wantResource != "" {
+				if err == nil || !strings.Contains(err.Error(), string(tc.wantResource)) || !strings.Contains(err.Error(), "NUMA node 2") {
+					t.Fatalf("allocation error = %v, want shortage of %s on NUMA node 2", err, tc.wantResource)
+				}
+				if memoryState.GetMemoryBlocks(string(casePod.UID), "app") != nil {
+					t.Fatal("failed allocation retained memory blocks")
+				}
+				for _, name := range []v1.ResourceName{v1.ResourceMemory, hugepages1Gi, pages2Mi} {
+					if memoryState.GetMachineState()[0].MemoryMap[name].Free != other.MemoryMap[name].Free || memoryState.GetMachineState()[2].MemoryMap[name].Free != selected.MemoryMap[name].Free {
+						t.Fatalf("failed allocation changed %s capacity", name)
+					}
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			blocks := memoryState.GetMemoryBlocks(string(casePod.UID), "app")
+			if len(blocks) != 3 {
+				t.Fatalf("allocation has %d blocks, want ordinary memory and two hugepage sizes", len(blocks))
+			}
+			for _, block := range blocks {
+				wantNode := 2
+				if tc.omitted {
+					wantNode = 0
+				}
+				if !reflect.DeepEqual(block.NUMAAffinity, []int{wantNode}) {
+					t.Fatalf("%s block has affinity %v, want only NUMA node %d", block.Type, block.NUMAAffinity, wantNode)
+				}
+				if !tc.omitted && memoryState.GetMachineState()[0].MemoryMap[block.Type].Free != other.MemoryMap[block.Type].Free {
+					t.Fatalf("allocation consumed %s on another node", block.Type)
+				}
+				if got := memoryState.GetMachineState()[wantNode].MemoryMap[block.Type].Free; got != selected.MemoryMap[block.Type].Free-block.Size {
+					t.Fatalf("%s free capacity = %d after allocation, want %d", block.Type, got, selected.MemoryMap[block.Type].Free-block.Size)
+				}
+			}
+		})
+	}
+}
+
+func TestStaticPolicyRequestedNUMAInitOnlyHugepages(t *testing.T) {
+	logger, ctx := ktesting.NewTestContext(t)
+	nodeID := int32(2)
+	initResources := v1.ResourceList{
+		v1.ResourceCPU:    resource.MustParse("1"),
+		v1.ResourceMemory: resource.MustParse("1Gi"),
+		hugepages1Gi:      resource.MustParse("1Gi"),
+	}
+	appResources := v1.ResourceList{
+		v1.ResourceCPU:    resource.MustParse("1"),
+		v1.ResourceMemory: resource.MustParse("1Gi"),
+	}
+	pod := &v1.Pod{ObjectMeta: metav1.ObjectMeta{UID: types.UID("init-hugepage-pod")}, Spec: v1.PodSpec{
+		NUMANode: &nodeID,
+		InitContainers: []v1.Container{{Name: "init", Resources: v1.ResourceRequirements{
+			Requests: initResources, Limits: initResources,
+		}}},
+		Containers: []v1.Container{{Name: "app", Resources: v1.ResourceRequirements{
+			Requests: appResources, Limits: appResources,
+		}}},
+	}}
+	stateForNode := func() *state.NUMANodeState {
+		return &state.NUMANodeState{MemoryMap: map[v1.ResourceName]*state.MemoryTable{
+			v1.ResourceMemory: {Allocatable: 2 * gb, Free: 2 * gb, TotalMemSize: 2 * gb},
+			hugepages1Gi:      {Allocatable: gb, Free: gb, TotalMemSize: gb},
+		}}
+	}
+	testCase := testStaticPolicy{
+		pod:            pod,
+		machineState:   state.NUMANodeMap{0: stateForNode(), 2: stateForNode()},
+		systemReserved: systemReservedMemory{0: {v1.ResourceMemory: 512 * mb}},
+	}
+	hint := &topologymanager.TopologyHint{NUMANodeAffinity: newNUMAAffinity(2), Preferred: true}
+	policy, memoryState, err := initTests(t, &testCase, hint, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hints := policy.GetPodTopologyHints(logger, memoryState, pod, lifecycle.AddOperation); len(hints[string(hugepages1Gi)]) == 0 {
+		t.Fatalf("init-only hugepage size missing from pod hints: %v", hints)
+	}
+	omitted := pod.DeepCopy()
+	omitted.Spec.NUMANode = nil
+	if hints := policy.GetPodTopologyHints(logger, memoryState, omitted, lifecycle.AddOperation); len(hints[string(hugepages1Gi)]) != 0 {
+		t.Fatalf("omitted-field init-only hugepage hints changed: %v", hints)
+	}
+	if err := policy.Allocate(ctx, memoryState, pod, &pod.Spec.InitContainers[0], lifecycle.AddOperation); err != nil {
+		t.Fatal(err)
+	}
+	if err := policy.Allocate(ctx, memoryState, pod, &pod.Spec.Containers[0], lifecycle.AddOperation); err != nil {
+		t.Fatal(err)
+	}
+	if blocks := memoryState.GetMemoryBlocks(string(pod.UID), "init"); len(blocks) != 2 {
+		t.Fatalf("init container lost hugepage assignment: %+v", blocks)
+	}
+	if nodeState := memoryState.GetMachineState()[2]; nodeState.MemoryMap[hugepages1Gi].Free != 0 || memoryState.GetMachineState()[0].MemoryMap[hugepages1Gi].Free != gb {
+		t.Fatalf("init-only hugepages were not confined to NUMA node 2: %+v", nodeState)
+	}
+}
+
+func TestStaticPolicyRequestedNUMAHugepageSidecarAccounting(t *testing.T) {
+	logger, ctx := ktesting.NewTestContext(t)
+	nodeID := int32(2)
+	restart := v1.ContainerRestartPolicyAlways
+	resources := v1.ResourceList{
+		v1.ResourceCPU:    resource.MustParse("1"),
+		v1.ResourceMemory: resource.MustParse("1Gi"),
+		hugepages1Gi:      resource.MustParse("1Gi"),
+	}
+	pod := &v1.Pod{ObjectMeta: metav1.ObjectMeta{UID: types.UID("sidecar-hugepage-pod")}, Spec: v1.PodSpec{
+		NUMANode: &nodeID,
+		InitContainers: []v1.Container{{Name: "sidecar", RestartPolicy: &restart, Resources: v1.ResourceRequirements{
+			Requests: resources, Limits: resources,
+		}}},
+		Containers: []v1.Container{{Name: "app", Resources: v1.ResourceRequirements{
+			Requests: resources, Limits: resources,
+		}}},
+	}}
+	for _, tc := range []struct {
+		name          string
+		localCapacity uint64
+		wantFailure   bool
+	}{
+		{name: "both concurrent allocations fit", localCapacity: 2 * gb},
+		{name: "one page fits but concurrent request does not", localCapacity: gb, wantFailure: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stateForNode := func(pages uint64) *state.NUMANodeState {
+				return &state.NUMANodeState{MemoryMap: map[v1.ResourceName]*state.MemoryTable{
+					v1.ResourceMemory: {Allocatable: 4 * gb, Free: 4 * gb, TotalMemSize: 4 * gb},
+					hugepages1Gi:      {Allocatable: pages, Free: pages, TotalMemSize: pages},
+				}}
+			}
+			testCase := testStaticPolicy{
+				pod:            pod,
+				machineState:   state.NUMANodeMap{0: stateForNode(2 * gb), 2: stateForNode(tc.localCapacity)},
+				systemReserved: systemReservedMemory{0: {v1.ResourceMemory: 512 * mb}},
+			}
+			hint := &topologymanager.TopologyHint{NUMANodeAffinity: newNUMAAffinity(2), Preferred: true}
+			policy, memoryState, err := initTests(t, &testCase, hint, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			hints := policy.GetPodTopologyHints(logger, memoryState, pod, lifecycle.AddOperation)
+			if tc.wantFailure {
+				if len(hints[string(hugepages1Gi)]) != 0 {
+					t.Fatalf("sidecar and app incorrectly fit on NUMA node 2: %v", hints)
+				}
+				return
+			}
+			if len(hints[string(hugepages1Gi)]) == 0 {
+				t.Fatalf("missing hugepage hint: %v", hints)
+			}
+			for _, container := range []v1.Container{pod.Spec.InitContainers[0], pod.Spec.Containers[0]} {
+				if err := policy.Allocate(ctx, memoryState, pod, &container, lifecycle.AddOperation); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got := memoryState.GetMachineState()[2].MemoryMap[hugepages1Gi].Free; got != 0 {
+				t.Fatalf("local hugepages remaining = %d, want 0", got)
+			}
+			if got := memoryState.GetMachineState()[0].MemoryMap[hugepages1Gi].Free; got != 2*gb {
+				t.Fatalf("hugepages on another node changed: %d", got)
+			}
+		})
+	}
+}
+
 func TestStaticPolicyAllocate(t *testing.T) {
 	logger, ctx := ktesting.NewTestContext(t)
 	testCases := []testStaticPolicy{

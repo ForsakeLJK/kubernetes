@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/util/sets"
 	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1"
 	"k8s.io/klog/v2"
@@ -54,13 +55,15 @@ func TestExplicitNUMARuntimeMasks(t *testing.T) {
 	pod := &v1.Pod{Spec: v1.PodSpec{NUMANode: &node}}
 	container := &v1.Container{Name: "app"}
 	for _, tc := range []struct {
-		name    string
-		cpuErr  error
-		memErr  error
-		wantErr bool
-		omitted bool
+		name      string
+		cpuErr    error
+		memErr    error
+		wantErr   bool
+		omitted   bool
+		hugepages bool
 	}{
 		{name: "successful placement"},
+		{name: "hugepage placement", hugepages: true},
 		{name: "missing CPU assignment", cpuErr: errors.New("missing CPU assignment"), wantErr: true},
 		{name: "missing memory assignment", memErr: errors.New("missing memory assignment"), wantErr: true},
 		{name: "omitted field retains runtime mask behavior", cpuErr: errors.New("unused validator"), omitted: true},
@@ -69,10 +72,16 @@ func TestExplicitNUMARuntimeMasks(t *testing.T) {
 			lifecycle := &internalContainerLifecycleImpl{cpuManager: numaRuntimeCPU{err: tc.cpuErr}, memoryManager: numaRuntimeMemory{err: tc.memErr}}
 			config := &runtimeapi.ContainerConfig{Linux: &runtimeapi.LinuxContainerConfig{Resources: &runtimeapi.LinuxContainerResources{}}}
 			casePod := pod.DeepCopy()
+			caseContainer := container.DeepCopy()
+			if tc.hugepages {
+				pages := v1.ResourceName(v1.ResourceHugePagesPrefix + "2Mi")
+				caseContainer.Resources.Requests = v1.ResourceList{pages: resource.MustParse("4Mi")}
+				caseContainer.Resources.Limits = v1.ResourceList{pages: resource.MustParse("4Mi")}
+			}
 			if tc.omitted {
 				casePod.Spec.NUMANode = nil
 			}
-			err := lifecycle.PreCreateContainer(klog.Background(), casePod, container, config)
+			err := lifecycle.PreCreateContainer(klog.Background(), casePod, caseContainer, config)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("PreCreateContainer error = %v", err)
 			}

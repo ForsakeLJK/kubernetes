@@ -143,20 +143,20 @@ func TestNUMAPlacementRefusesRestoredCPUAssignment(t *testing.T) {
 func TestNUMAPlacementPodWideAccounting(t *testing.T) {
 	logger, ctx := ktesting.NewTestContext(t)
 	for _, tc := range []struct {
-		name          string
-		initCPUs      []string
-		appCPUs       []string
-		sidecar       bool
-		omitted       bool
-		memoryGiB     uint64
-		wantCPUs      int
-		wantMemoryGiB uint64
-		admit         bool
+		name         string
+		initCPUs     []string
+		appCPUs      []string
+		sidecar      bool
+		omitted      bool
+		memoryGiB    uint64
+		wantCPUs     int
+		wantMemoryGB uint64
+		admit        bool
 	}{
-		{name: "concurrent applications", appCPUs: []string{"1", "1"}, wantCPUs: 2, wantMemoryGiB: 2, admit: true},
-		{name: "sequential init reuse", initCPUs: []string{"2", "2"}, appCPUs: []string{"1", "1"}, wantCPUs: 2, wantMemoryGiB: 2, admit: true},
-		{name: "sidecar overlaps later init and applications", initCPUs: []string{"2", "2"}, appCPUs: []string{"1", "1"}, sidecar: true, wantCPUs: 3, wantMemoryGiB: 3, admit: true},
-		{name: "omitted field retains pod-wide allocation and reuse", initCPUs: []string{"2", "2"}, appCPUs: []string{"1", "1"}, sidecar: true, omitted: true, admit: true},
+		{name: "concurrent applications", appCPUs: []string{"1", "1"}, wantCPUs: 2, wantMemoryGB: 2, admit: true},
+		{name: "sequential init reuse", initCPUs: []string{"2", "2"}, appCPUs: []string{"1", "1"}, wantCPUs: 2, wantMemoryGB: 2, admit: true},
+		{name: "sidecar overlaps later init and applications", initCPUs: []string{"2", "2"}, appCPUs: []string{"1", "1"}, sidecar: true, wantCPUs: 3, wantMemoryGB: 3, admit: true},
+		{name: "omitted field retains pod-wide allocation and reuse", initCPUs: []string{"2", "2"}, appCPUs: []string{"1", "1"}, sidecar: true, omitted: true, wantCPUs: 3, wantMemoryGB: 3, admit: true},
 		{name: "combined applications exceed requested node", appCPUs: []string{"4", "4"}},
 		{name: "combined memory exceeds requested node", appCPUs: []string{"1", "1", "1"}, memoryGiB: 2},
 	} {
@@ -223,12 +223,19 @@ func TestNUMAPlacementPodWideAccounting(t *testing.T) {
 					t.Fatalf("%s memory blocks = %+v, want requested node", container.Name, blocks)
 				}
 			}
-			if !tc.omitted {
-				if used := initialCPUs.Difference(cpuState.GetDefaultCPUSet()).Size(); used != tc.wantCPUs {
-					t.Fatalf("reserved CPUs = %d, want %d", used, tc.wantCPUs)
+			if used := initialCPUs.Difference(cpuState.GetDefaultCPUSet()).Size(); used != tc.wantCPUs {
+				t.Fatalf("reserved CPUs = %d, want %d", used, tc.wantCPUs)
+			}
+			if tc.omitted {
+				machine := memoryState.GetMachineState()
+				free := machine[0].MemoryMap[v1.ResourceMemory].Free + machine[1].MemoryMap[v1.ResourceMemory].Free
+				want := 4*gib + requestedNodeMemory - tc.wantMemoryGB*1000*1000*1000
+				if free != want {
+					t.Fatalf("free memory across nodes = %d, want %d", free, want)
 				}
-				if free := memoryState.GetMachineState()[1].MemoryMap[v1.ResourceMemory].Free; free != requestedNodeMemory-tc.wantMemoryGiB*1000*1000*1000 {
-					t.Fatalf("free memory = %d, want %d", free, requestedNodeMemory-tc.wantMemoryGiB*1000*1000*1000)
+			} else {
+				if free := memoryState.GetMachineState()[1].MemoryMap[v1.ResourceMemory].Free; free != requestedNodeMemory-tc.wantMemoryGB*1000*1000*1000 {
+					t.Fatalf("free memory = %d, want %d", free, requestedNodeMemory-tc.wantMemoryGB*1000*1000*1000)
 				}
 			}
 			for _, container := range append(pod.Spec.InitContainers, pod.Spec.Containers...) {
@@ -237,8 +244,9 @@ func TestNUMAPlacementPodWideAccounting(t *testing.T) {
 				}
 				memoryPolicy.RemoveContainer(logger, memoryState, string(pod.UID), container.Name)
 			}
-			if !cpuState.GetDefaultCPUSet().Equals(initialCPUs) || len(memoryState.GetMemoryAssignments()[string(pod.UID)]) != 0 || memoryState.GetMachineState()[1].MemoryMap[v1.ResourceMemory].Free != requestedNodeMemory {
-				t.Fatalf("normal cleanup retained allocations: CPUs=%s memory=%v node=%+v", cpuState.GetDefaultCPUSet(), memoryState.GetMemoryAssignments()[string(pod.UID)], memoryState.GetMachineState()[1])
+			machine := memoryState.GetMachineState()
+			if !cpuState.GetDefaultCPUSet().Equals(initialCPUs) || len(memoryState.GetMemoryAssignments()[string(pod.UID)]) != 0 || machine[0].MemoryMap[v1.ResourceMemory].Free != 4*gib || machine[1].MemoryMap[v1.ResourceMemory].Free != requestedNodeMemory {
+				t.Fatalf("normal cleanup retained allocations: CPUs=%s memory=%v nodes=%+v", cpuState.GetDefaultCPUSet(), memoryState.GetMemoryAssignments()[string(pod.UID)], machine)
 			}
 		})
 	}

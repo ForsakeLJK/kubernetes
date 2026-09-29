@@ -1,18 +1,16 @@
-# Kubernetes NUMA placement research fork
-
-This is a private fork of [Kubernetes](https://github.com/kubernetes/kubernetes) for research into explicit NUMA placement. It adds a Pod-level NUMA node requirement that the kubelet's resource managers enforce. The work targets research experiments; upstream acceptance is outside the current scope.
+# Explicit NUMA placement: design, code changes, and testing
 
 A Pod in this fork can set `spec.numaNode: 1` to require its CPUs and memory allocations on NUMA node 1 of the machine running it. The kubelet refuses the Pod if that node cannot satisfy the request, even when another NUMA node has spare resources. The requirement covers application containers, init containers, and sidecars, including requested hugepages.
 
-The implementation covers placement, failure cleanup, and restart recovery. Linux multi-NUMA acceptance tests have not run because no suitable host was available. The [test results](.scratch/explicit-numa-placement/runtime/results.md) record the automated checks and the runtime cases still awaiting execution. The code described here is at commit `2d2f7ebd627`, compared with baseline `68f9fc030c6`.
+The implementation described here is at commit `2d2f7ebd627`, compared with the original baseline `68f9fc030c6`. Implementation tickets 01 through 05 are resolved. Ticket 06 has a test procedure and fixtures, but its Linux multi-NUMA acceptance tests have not run. The [test results](runtime/results.md) record the missing host and the automated checks already performed.
 
-## Placement rules
+## The design
 
 `numaNode` is an optional integer from 0 through 63. Omitting it keeps the existing allocation path; setting it to zero explicitly selects NUMA 0. The API stores the field as a pointer so those cases remain distinct. The ID is local to the selected machine, and the kubelet checks that it exists in the machine's topology.
 
 The scheduler has not changed. The operator still has to select a suitable machine. A Pod assigned to an unsuitable machine can fail kubelet admission, with no new mechanism to move it elsewhere.
 
-Participating Pods require this setup:
+The supported setup is deliberately narrow:
 
 | Requirement | Value |
 | --- | --- |
@@ -43,22 +41,24 @@ Devices keep their existing topology-policy checks. A conflicting device hint ca
 
 ## Where the code changed
 
+Paths below are relative to the Kubernetes repository. The links point to the main implementation files, with tests alongside them.
+
 | Area | Files and reason for the change |
 | --- | --- |
-| Pod API | [External PodSpec](staging/src/k8s.io/api/core/v1/types.go) and [internal PodSpec](pkg/apis/core/types.go) add `NUMANode *int32`. Generated protobuf, deepcopy, OpenAPI, apply-configuration code, and API fixtures carry the field through serialization and clients. Workload API schemas change because they embed Pod templates. |
-| Validation | [Core validation](pkg/apis/core/validation/validation.go) checks the ID and container resources, rejects Windows declarations and Pod-level budgets, and enforces immutability, resize, and ephemeral-container restrictions. |
-| Kubelet admission | [NUMA admission handler](pkg/kubelet/numa_placement.go), registered in [kubelet initialization](pkg/kubelet/kubelet.go), rejects unsupported configurations and absent local IDs. |
-| Topology coordination | [Pod-scope Topology Manager](pkg/kubelet/cm/topologymanager/scope_pod.go) selects the requested affinity, preserves device-policy checks, validates recovered assignments, and coordinates rollback across providers and containers. |
-| CPU allocation | [Static CPU policy](pkg/kubelet/cm/cpumanager/policy_static.go) restricts allocation to the requested node. [CPU Manager](pkg/kubelet/cm/cpumanager/cpu_manager.go) validates restored assignments and snapshots assignment/reuse state for rollback. |
-| Memory and hugepages | [Static memory policy](pkg/kubelet/cm/memorymanager/policy_static.go) checks local capacity, prevents mask expansion, and includes resources requested only by init containers or sidecars. [Memory Manager](pkg/kubelet/cm/memorymanager/memory_manager.go) validates restored blocks and restores accounting after failure. |
-| Device cleanup | [Device Manager](pkg/kubelet/cm/devicemanager/manager.go) removes device allocation records created by an unsuccessful placement attempt and preserves earlier records. |
-| Container startup | [Linux container lifecycle](pkg/kubelet/cm/internal_container_lifecycle_linux.go) requires validated CPU and memory assignments before supplying the runtime masks. |
+| Pod API | [External PodSpec](../../staging/src/k8s.io/api/core/v1/types.go) and [internal PodSpec](../../pkg/apis/core/types.go) add `NUMANode *int32`. Generated protobuf, deepcopy, OpenAPI, apply-configuration code, and API fixtures carry the field through serialization and clients. Workload API schemas change because they embed Pod templates. |
+| Validation | [Core validation](../../pkg/apis/core/validation/validation.go) checks the ID and container resources, rejects Windows declarations and Pod-level budgets, and enforces immutability, resize, and ephemeral-container restrictions. |
+| Kubelet admission | [NUMA admission handler](../../pkg/kubelet/numa_placement.go), registered in [kubelet initialization](../../pkg/kubelet/kubelet.go), rejects unsupported configurations and absent local IDs. |
+| Topology coordination | [Pod-scope Topology Manager](../../pkg/kubelet/cm/topologymanager/scope_pod.go) selects the requested affinity, preserves device-policy checks, validates recovered assignments, and coordinates rollback across providers and containers. |
+| CPU allocation | [Static CPU policy](../../pkg/kubelet/cm/cpumanager/policy_static.go) restricts allocation to the requested node. [CPU Manager](../../pkg/kubelet/cm/cpumanager/cpu_manager.go) validates restored assignments and snapshots assignment/reuse state for rollback. |
+| Memory and hugepages | [Static memory policy](../../pkg/kubelet/cm/memorymanager/policy_static.go) checks local capacity, prevents mask expansion, and includes resources requested only by init containers or sidecars. [Memory Manager](../../pkg/kubelet/cm/memorymanager/memory_manager.go) validates restored blocks and restores accounting after failure. |
+| Device cleanup | [Device Manager](../../pkg/kubelet/cm/devicemanager/manager.go) removes device allocation records created by an unsuccessful placement attempt and preserves earlier records. |
+| Container startup | [Linux container lifecycle](../../pkg/kubelet/cm/internal_container_lifecycle_linux.go) requires validated CPU and memory assignments before supplying the runtime masks. |
 
 No scheduler implementation changed. Tests cover API round-trips and client operations, validation, admission, allocation failures, init/sidecar accounting, hugepages, rollback, recovery, and construction of runtime masks. Constructing the correct runtime configuration still needs a separate check that the Linux runtime enforces it.
 
 ## Run the automated tests
 
-Run these commands from the root of this fork with the toolchain required by its `go.mod` (Go 1.27.0 or newer for this checkout). The focused run exercises the NUMA tests without requiring a running cluster:
+Run these commands from the Kubernetes repository root with the toolchain required by its `go.mod` (Go 1.27.0 or newer for this checkout). The focused run exercises the NUMA tests without requiring a running cluster:
 
 ```sh
 go test -count=1 -run 'NUMA' \
@@ -76,7 +76,7 @@ go test -count=1 -run 'NUMA' \
 
 Run on Linux to include the Linux-only container-lifecycle tests. A successful cross-compile on another operating system does not execute those tests. For broader regression coverage, rerun the command without `-run 'NUMA'`.
 
-The existing results report passing focused tests, some sandbox-related socket failures in broader suites, and an incomplete repository-wide run. Earlier ticket records also contain an unclassified Device Manager race-test failure. There is no recorded full-suite pass. See the linked results record for the commands, environment, and outcomes.
+The existing results report passing focused tests, some sandbox-related socket failures in broader suites, and an incomplete repository-wide run. Earlier ticket records also contain an unclassified Device Manager race-test failure. There is no recorded full-suite pass. Those results are historical evidence, not a fresh test run for this guide.
 
 ## Try a Pod on a Linux test machine
 
@@ -189,7 +189,7 @@ To test compatibility, delete `numa-demo`, remove its `numaNode` line from a cop
 
 ## Complete the runtime acceptance tests
 
-The [runtime procedure](.scratch/explicit-numa-placement/runtime/README.md) provides fixtures and commands for the remaining cases:
+The [runtime procedure](runtime/README.md) provides fixtures and commands for the remaining cases:
 
 - Application containers, an ordinary init container, and a restartable sidecar. The fixture needs three CPUs and 384 MiB at steady state. Inspect the ordinary init during its ten-minute run.
 - Hugepages on each tested NUMA node, including a write into the hugepage mount. Provision pages before testing and record per-node capacity.
@@ -197,24 +197,10 @@ The [runtime procedure](.scratch/explicit-numa-placement/runtime/README.md) prov
 - CPU, ordinary-memory, and hugepage shortages on the requested node while another NUMA node retains spare capacity. Bind test Pods to the machine so a scheduler refusal does not mask the kubelet behavior.
 - Failed-admission and normal-cleanup checks against CPU/Memory Manager assignments, plus device-policy behavior when a suitable device plugin is available.
 
-Record manifests, the fork commit, kubelet configuration, topology, process masks, and failure events in a dated copy of the [results record](.scratch/explicit-numa-placement/runtime/results.md). Mark unavailable cases `NOT RUN`. A `Running` Pod alone does not establish correct placement, and a failed request alone does not prove partial-allocation rollback occurred.
+Record manifests, the fork commit, kubelet configuration, topology, process masks, and failure events in a dated copy of the [results record](runtime/results.md). Mark unavailable cases `NOT RUN`. A `Running` Pod alone does not establish correct placement, and a failed request alone does not prove partial-allocation rollback occurred.
 
-After recording the results, remove the test namespace:
+After recording the results, remove the namespace created for this guide:
 
 ```sh
 kubectl delete namespace "$NS"
 ```
-
-## Design records and upstream Kubernetes
-
-The [feature specification](.scratch/explicit-numa-placement/spec.md) records the agreed behavior. The [implementation tickets](.scratch/explicit-numa-placement/issues/) contain the development and verification history, and the [runtime procedure](.scratch/explicit-numa-placement/runtime/README.md) includes the multi-container and hugepage fixtures.
-
-Kubernetes is an open source system for deploying and managing containerized applications. General Kubernetes documentation and contributor resources remain available upstream:
-
-- [Kubernetes documentation](https://kubernetes.io)
-- [Developer documentation](https://git.k8s.io/community/contributors/devel#readme)
-- [Troubleshooting](https://kubernetes.io/docs/tasks/debug/)
-- [Community and communication](https://git.k8s.io/community/communication)
-- [Published components](staging/README.md)
-
-Use [CONTRIBUTING.md](CONTRIBUTING.md) for the repository's contribution guidance and [LICENSE](LICENSE) for its license. The NUMA field and behavior described above are additions in this fork.

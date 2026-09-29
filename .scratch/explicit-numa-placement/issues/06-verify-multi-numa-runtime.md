@@ -4,7 +4,7 @@
 
 **Blocked by:** 05 — Preserve placement through container and kubelet restarts.
 
-**Status:** ready-for-agent
+**Status:** claimed
 
 **Type:** task
 
@@ -23,3 +23,9 @@
 ## Comments
 
 Approved ticket breakdown: slice 06 of 06. Ticket 05 transitively depends on all preceding implementation slices. Real multi-NUMA runtime evidence is required for complete acceptance.
+
+2026-09-29: Added [Linux runtime procedure](../runtime/README.md), Pod fixtures,
+an effective-mask checker, and a [results record](../runtime/results.md). The
+local macOS workspace has no multi-NUMA Linux node, fork API server/kubelet
+deployment, or CRI runtime. Host-dependent cases remain unexecuted, so this
+ticket remains claimed rather than resolved.

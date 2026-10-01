@@ -1,14 +1,10 @@
 # Kubernetes NUMA placement support
 
-[TOC]
-
-## Introduction
-
-This is a private fork of [Kubernetes](https://github.com/kubernetes/kubernetes) for research into explicit NUMA placement. It adds a Pod-level NUMA node requirement that the kubelet's resource managers enforce. The work targets research experiments; upstream acceptance is outside the current scope.
+This is a private fork of [Kubernetes](https://github.com/kubernetes/kubernetes) for research into explicit NUMA placement. It adds a Pod-level NUMA node requirement that the kubelet's resource managers enforce.
 
 A Pod in this fork can set `spec.numaNode: 1` to require its CPUs and memory allocations on NUMA node 1 of the machine running it. The kubelet refuses the Pod if that node cannot satisfy the request, even when another NUMA node has spare resources. The requirement covers application containers, init containers, and sidecars, including requested hugepages.
 
-The implementation covers placement, failure cleanup, and restart recovery. Linux multi-NUMA acceptance tests was run only on an Ubuntu ARM64 VM because no suitable host was available. The [test results](.scratch/explicit-numa-placement/runtime/results.md) record the automated checks and the runtime cases still awaiting execution.
+The implementation covers placement, failure cleanup, and restart recovery. **Linux acceptance tests were only run on an Ubuntu ARM64 Virtual Machine.** The [test results](.scratch/explicit-numa-placement/runtime/results.md) record the automated checks and the runtime cases still awaiting execution.
 
 ## Run Example
 

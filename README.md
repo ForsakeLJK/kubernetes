@@ -1,4 +1,4 @@
-# Kubernetes NUMA placement research fork
+# Kubernetes NUMA placement support
 
 [TOC]
 

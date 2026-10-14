@@ -18,11 +18,11 @@ package topologymanager
 
 import (
 	"fmt"
-	"strings"
 
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
 	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
+	corehelper "k8s.io/kubernetes/pkg/apis/core/v1/helper"
 	v1qos "k8s.io/kubernetes/pkg/apis/core/v1/helper/qos"
 )
 
@@ -132,8 +132,11 @@ func ValidateIndependentNUMARequest(pod *v1.Pod) error {
 		}
 		for _, resources := range []v1.ResourceList{container.Resources.Requests, container.Resources.Limits} {
 			for name := range resources {
-				if strings.HasPrefix(string(name), v1.ResourceHugePagesPrefix) {
-					return fmt.Errorf("container %s: unsupported independent-numa slice: hugepage requests are not implemented (%s)", container.Name, name)
+				if corehelper.IsHugePageResourceName(name) {
+					request, limit := container.Resources.Requests[name], container.Resources.Limits[name]
+					if request.Cmp(limit) != 0 {
+						return fmt.Errorf("container %s: NUMA placement requires equal requests and limits for %s", container.Name, name)
+					}
 				}
 			}
 		}

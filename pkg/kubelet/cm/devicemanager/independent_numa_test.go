@@ -63,6 +63,11 @@ func (p independentNUMAFailure) Allocate(_ context.Context, _ *v1.Pod, c *v1.Con
 }
 
 func TestIndependentNUMADeviceAllocation(t *testing.T) {
+	t.Run("ordinary memory", func(t *testing.T) { testIndependentNUMADeviceAllocation(t, false) })
+	t.Run("hugepages", func(t *testing.T) { testIndependentNUMADeviceAllocation(t, true) })
+}
+
+func testIndependentNUMADeviceAllocation(t *testing.T, hugepages bool) {
 	for _, workload := range []string{"single", "applications", "init", "sidecar"} {
 		for _, automatic := range []string{"", "CPU", "memory", "remote memory"} {
 			for _, tc := range []struct {
@@ -98,6 +103,12 @@ func TestIndependentNUMADeviceAllocation(t *testing.T) {
 					if automatic == "remote memory" {
 						info.Topology[1].Memory = gib / 2
 						numaInfo.NUMADistances = map[int][]uint64{2: {40, 10, 20}}
+					}
+					if hugepages {
+						for i := range info.Topology {
+							info.Topology[i].HugePages = []cadvisorapi.HugePagesInfo{{PageSize: 2048, NumPages: 8}, {PageSize: 1048576, NumPages: 4}}
+							info.Topology[i].Memory += 4*gib + 16*1024*1024
+						}
 					}
 					scope := topologymanager.NewPodScope(topologymanager.NewIndependentNUMAPolicy(numaInfo, topologymanager.PolicyOptions{}))
 					directory := t.TempDir()
@@ -136,6 +147,10 @@ func TestIndependentNUMADeviceAllocation(t *testing.T) {
 					scope.AddHintProvider(logger, memory)
 					scope.AddHintProvider(logger, device)
 					resources := v1.ResourceList{v1.ResourceCPU: resource.MustParse("1"), v1.ResourceMemory: resource.MustParse("1Gi"), "domain1.com/resource1": resource.MustParse("2")}
+					if hugepages {
+						resources["hugepages-2Mi"] = resource.MustParse("2Mi")
+						resources["hugepages-1Gi"] = resource.MustParse("1Gi")
+					}
 					pod := &v1.Pod{ObjectMeta: metav1.ObjectMeta{UID: "independent-device"}, Spec: v1.PodSpec{CPUNUMA: ptr.To[int32](2), MemNUMA: ptr.To[int32](3), Containers: []v1.Container{{Name: "app", Resources: v1.ResourceRequirements{Requests: resources, Limits: resources}}}}}
 					if workload != "single" {
 						pod.Spec.Containers[0].Resources.Requests["domain1.com/resource1"] = resource.MustParse("1")

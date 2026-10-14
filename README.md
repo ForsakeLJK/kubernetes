@@ -295,9 +295,10 @@ the same exact CPU/memory target, refusal, rollback, and recovery guarantees
 under either policy. For example, `numaNode: 2` always requires both resources
 on node 2 under `independent-numa`.
 
-For one application container, set both `spec.cpuNUMA` and `spec.memNUMA` to
+Set both `spec.cpuNUMA` and `spec.memNUMA` to
 require separate CPU and memory targets. For example, `cpuNUMA: 0` with
-`memNUMA: 3` allocates CPUs on node 0 and confines ordinary memory to node 3,
+`memNUMA: 3` allocates CPUs on node 0 and confines ordinary memory and every
+requested hugepage size to node 3,
 which may have no CPUs. Equal targets are also supported. Each ID is from 0
 through 63 and is immutable; `numaNode` cannot be combined with either field.
 Both static managers, Guaranteed equal CPU/memory requests and limits, and
@@ -323,7 +324,12 @@ Concrete CPU sets and memory quantities retain sequential init reuse and
 sidecar overlap. Recovery preserves surviving assignments, including when
 completed init allocations have already been released.
 
-Hugepages are refused with unsupported-slice diagnostics pending ticket 07.
+Ordinary memory and all requested hugepage sizes form one memory group. Automatic
+memory placement ranks only nodes that can hold the entire group's effective
+peak, including init reuse and sidecar overlap. An explicit memory target refuses
+admission if any requested page size is absent or exhausted there, even when
+another node has spare pages. Recovery and rollback cover every memory resource;
+the runtime memory-node mask remains exactly the selected singleton.
 Pod budgets, resize, and ephemeral containers are excluded.
 Ordinary and legacy Pods retain their existing behavior.
 

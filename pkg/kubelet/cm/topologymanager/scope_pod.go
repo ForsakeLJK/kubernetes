@@ -115,8 +115,17 @@ func (s *podScope) admitUsingContainerResources(ctx context.Context, pod *v1.Pod
 	}
 
 	var acquired []func() error
+	failAdmission := func(err error) lifecycle.PodAdmitResult {
+		for i := len(acquired) - 1; i >= 0; i-- {
+			if releaseErr := acquired[i](); releaseErr != nil {
+				logger.Error(releaseErr, "Failed to release NUMA allocation after admission failure", "pod", klog.KObj(pod))
+			}
+		}
+		metrics.TopologyManagerAdmissionErrorsTotal.Inc()
+		return admission.GetPodAdmitResult(err)
+	}
 	for _, container := range append(pod.Spec.InitContainers, pod.Spec.Containers...) {
-		if placement.Independent && completedInitContainer(pod, &container) {
+		if placement.Independent && NUMAInitContainerCompleted(pod, &container) {
 			// Released sequential init assignments must not be recreated over
 			// the surviving applications and sidecars during recovery.
 			continue
@@ -139,13 +148,25 @@ func (s *podScope) admitUsingContainerResources(ctx context.Context, pod *v1.Pod
 			err = s.allocateAlignedResources(ctx, pod, &container, operation)
 		}
 		if err != nil {
-			for i := len(acquired) - 1; i >= 0; i-- {
-				if releaseErr := acquired[i](); releaseErr != nil {
-					logger.Error(releaseErr, "Failed to release NUMA allocation after admission failure", "pod", klog.KObj(pod))
+			return failAdmission(err)
+		}
+	}
+	if placement.Independent {
+		// Init reservations may be held by later containers. Validate their
+		// complete coverage after all missing assignments have been restored.
+		for _, container := range append(pod.Spec.InitContainers, pod.Spec.Containers...) {
+			if NUMAInitContainerCompleted(pod, &container) {
+				continue
+			}
+			for _, provider := range s.hintProviders {
+				if validator, ok := provider.(interface {
+					ValidateNUMAPlacement(*v1.Pod, *v1.Container) error
+				}); ok {
+					if err := validator.ValidateNUMAPlacement(pod, &container); err != nil {
+						return failAdmission(numaPlacementError{fmt.Sprintf("CPU NUMA node %d, memory NUMA node %d: %v", placement.CPU, placement.Memory, err)})
+					}
 				}
 			}
-			metrics.TopologyManagerAdmissionErrorsTotal.Inc()
-			return admission.GetPodAdmitResult(err)
 		}
 	}
 
@@ -215,7 +236,9 @@ func (s *podScope) requestedPlacement(logger klog.Logger, pod *v1.Pod, placement
 		}
 		_, err := s.requestedAffinityFromHints(logger, pod, placement, providersHints)
 		var resourceError numaResourceAffinityError
-		if errors.As(err, &resourceError) && resourceError.resource != resource || !automaticCPU && err != nil && !errors.As(err, &resourceError) {
+		isResourceError := errors.As(err, &resourceError)
+		isAutomaticResource := resourceError.resource == resource || !automaticCPU && corehelper.IsHugePageResourceName(resourceError.resource)
+		if isResourceError && !isAutomaticResource || !automaticCPU && err != nil && !isResourceError {
 			return NUMAPlacement{}, err
 		}
 		if restored == id {
@@ -231,7 +254,7 @@ func (s *podScope) requestedPlacement(logger klog.Logger, pod *v1.Pod, placement
 		return NUMAPlacement{}, numaPlacementError{fmt.Sprintf("restored %s NUMA node %d is absent from the topology", resource, restored)}
 	}
 	if len(candidates) == 0 && !automaticCPU {
-		return NUMAPlacement{}, numaPlacementError{"no feasible singleton memory node with sufficient ordinary memory capacity and compatible memory topology"}
+		return NUMAPlacement{}, numaPlacementError{"no feasible singleton memory node with sufficient ordinary memory and requested hugepage capacity and compatible memory topology"}
 	}
 	selected, err := policy.numaInfo.closestPlacement(candidates)
 	if err != nil {
@@ -240,7 +263,8 @@ func (s *podScope) requestedPlacement(logger klog.Logger, pod *v1.Pod, placement
 	return selected, nil
 }
 
-func completedInitContainer(pod *v1.Pod, container *v1.Container) bool {
+// NUMAInitContainerCompleted identifies released sequential-init demand.
+func NUMAInitContainerCompleted(pod *v1.Pod, container *v1.Container) bool {
 	for _, init := range pod.Spec.InitContainers {
 		if init.Name != container.Name || podutil.IsRestartableInitContainer(&init) {
 			continue
@@ -351,7 +375,7 @@ func (s *podScope) allocateRequestedResources(ctx context.Context, pod *v1.Pod, 
 		}
 		if validator, ok := provider.(interface {
 			ValidateNUMAPlacement(*v1.Pod, *v1.Container) error
-		}); ok {
+		}); ok && !placement.Independent {
 			if err := validator.ValidateNUMAPlacement(pod, container); err != nil {
 				return acquired, numaPlacementError{err.Error()}
 			}
@@ -465,7 +489,7 @@ func (s *podScope) accumulateProvidersHints(logger klog.Logger, pod *v1.Pod, ope
 		activePod := pod.DeepCopy()
 		activePod.Spec.InitContainers = nil
 		for _, init := range pod.Spec.InitContainers {
-			if !completedInitContainer(pod, &init) {
+			if !NUMAInitContainerCompleted(pod, &init) {
 				activePod.Spec.InitContainers = append(activePod.Spec.InitContainers, init)
 			}
 		}

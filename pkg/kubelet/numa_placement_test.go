@@ -160,7 +160,8 @@ func TestIndependentNUMAPlacementAdmission(t *testing.T) {
 		}},
 		{name: "hugepages", edit: func(p *v1.Pod, _ *cm.NodeConfig) {
 			p.Spec.Containers[0].Resources.Requests[v1.ResourceName("hugepages-2Mi")] = resource.MustParse("2Mi")
-		}, want: "hugepage requests"},
+			p.Spec.Containers[0].Resources.Limits[v1.ResourceName("hugepages-2Mi")] = resource.MustParse("2Mi")
+		}},
 		{name: "fractional CPUs", edit: func(p *v1.Pod, _ *cm.NodeConfig) {
 			p.Spec.Containers[0].Resources.Requests[v1.ResourceCPU] = resource.MustParse("500m")
 			p.Spec.Containers[0].Resources.Limits[v1.ResourceCPU] = resource.MustParse("500m")
@@ -191,7 +192,7 @@ func TestIndependentNUMAPodWideDeclarations(t *testing.T) {
 	}}
 	for _, form := range []string{"explicit", "CPU-only", "memory-only"} {
 		for _, kind := range []string{"application", "init", "sidecar"} {
-			for _, invalid := range []string{"valid", "fractional CPU", "unequal memory", "hugepages"} {
+			for _, invalid := range []string{"valid", "fractional CPU", "unequal memory", "hugepages", "valid hugepages"} {
 				t.Run(form+"/"+kind+"/"+invalid, func(t *testing.T) {
 					resources := v1.ResourceList{v1.ResourceCPU: resource.MustParse("1"), v1.ResourceMemory: resource.MustParse("256Mi")}
 					app := v1.Container{Name: "app", Resources: v1.ResourceRequirements{Requests: resources.DeepCopy(), Limits: resources.DeepCopy()}}
@@ -203,6 +204,11 @@ func TestIndependentNUMAPodWideDeclarations(t *testing.T) {
 						other.Resources.Limits[v1.ResourceCPU] = resource.MustParse("0.9999")
 					case "unequal memory":
 						other.Resources.Limits[v1.ResourceMemory] = resource.MustParse("512Mi")
+					case "valid hugepages":
+						other.Resources.Requests["hugepages-2Mi"] = resource.MustParse("2Mi")
+						other.Resources.Limits["hugepages-2Mi"] = resource.MustParse("2Mi")
+						other.Resources.Requests["hugepages-1Gi"] = resource.MustParse("1Gi")
+						other.Resources.Limits["hugepages-1Gi"] = resource.MustParse("1Gi")
 					case "hugepages":
 						other.Resources.Limits["hugepages-2Mi"] = resource.MustParse("2Mi")
 					}
@@ -224,7 +230,7 @@ func TestIndependentNUMAPodWideDeclarations(t *testing.T) {
 					}
 					pod.Status.QOSClass = v1.PodQOSGuaranteed
 					result := h.Admit(context.Background(), &lifecycle.PodAdmitAttributes{Pod: pod})
-					if result.Admit != (invalid == "valid") {
+					if result.Admit != (invalid == "valid" || invalid == "valid hugepages") {
 						t.Fatalf("admission = %+v", result)
 					}
 				})

@@ -64,6 +64,7 @@ type podWideNUMAFixture struct {
 	logger       klog.Logger
 	directory    string
 	distances    map[int][]uint64
+	hugepages    map[int][]cadvisorapi.HugePagesInfo
 	failAfterCPU string
 	scope        topologymanager.Scope
 	cpu          cpumanager.Manager
@@ -71,8 +72,12 @@ type podWideNUMAFixture struct {
 }
 
 func newPodWideNUMAFixture(t *testing.T) *podWideNUMAFixture {
+	return newPodWideNUMAFixtureWithHugepages(t, nil)
+}
+
+func newPodWideNUMAFixtureWithHugepages(t *testing.T, hugepages map[int][]cadvisorapi.HugePagesInfo) *podWideNUMAFixture {
 	logger, ctx := ktesting.NewTestContext(t)
-	f := &podWideNUMAFixture{t: t, ctx: ctx, logger: logger, directory: t.TempDir(), distances: map[int][]uint64{0: {10, 20, 40}, 2: {40, 10, 20}}}
+	f := &podWideNUMAFixture{t: t, ctx: ctx, logger: logger, directory: t.TempDir(), distances: map[int][]uint64{0: {10, 20, 40}, 2: {40, 10, 20}}, hugepages: hugepages}
 	f.restart()
 	return f
 }
@@ -80,6 +85,13 @@ func newPodWideNUMAFixture(t *testing.T) *podWideNUMAFixture {
 func (f *podWideNUMAFixture) restart() {
 	f.t.Helper()
 	info := &cadvisorapi.MachineInfo{NumCores: 12, Topology: []cadvisorapi.Node{{Id: 0, Memory: 16 * podWideMemoryUnit}, {Id: 2, Memory: 2 * podWideMemoryUnit}, {Id: 3, Memory: 4 * podWideMemoryUnit}}}
+	for i := range info.Topology {
+		node := &info.Topology[i]
+		node.HugePages = f.hugepages[node.Id]
+		for _, pages := range node.HugePages {
+			node.Memory += pages.PageSize * 1024 * pages.NumPages
+		}
+	}
 	for cpu := 0; cpu < 12; cpu++ {
 		index := 0
 		if cpu >= 8 {

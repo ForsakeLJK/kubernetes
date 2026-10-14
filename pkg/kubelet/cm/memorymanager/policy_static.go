@@ -502,32 +502,19 @@ func (p *staticPolicy) Allocate(ctx context.Context, s state.State, pod *v1.Pod,
 	if placement.Independent && isRegularInitContainer(pod, container) {
 		// Future assignments already pay for part of this sequential init's
 		// peak. Keep those blocks intact and charge only its residual demand.
-		future := make(map[v1.ResourceName]uint64)
-		afterCurrent := false
-		for sibling := range podutil.ContainerIter(&pod.Spec, podutil.InitContainers|podutil.Containers) {
-			if sibling.Name == container.Name {
-				afterCurrent = true
-				continue
-			}
-			if !afterCurrent || topologymanager.NUMAContainersOverlap(pod, container, sibling) {
-				continue
-			}
-			for _, block := range s.GetMemoryBlocks(podUID, sibling.Name) {
-				future[block.Type] += block.Size
-			}
+		future, _, err := getFutureNUMAMemory(logger, s, pod, container)
+		if err != nil {
+			return err
 		}
 		for name, size := range requestedResources {
 			requestedResources[name] = size - min(size, future[name])
 		}
 	}
+	var reusableByContainer map[string]map[v1.ResourceName]uint64
 	if placement.Independent {
-		for _, init := range pod.Spec.InitContainers {
-			if init.Name == container.Name {
-				break
-			}
-			if isRegularInitContainer(pod, &init) {
-				p.updatePodReusableMemory(pod, &init, s.GetMemoryBlocks(podUID, init.Name))
-			}
+		reusableByContainer, err = p.independentReusableMemory(logger, s, pod, container)
+		if err != nil {
+			return err
 		}
 	}
 
@@ -628,7 +615,7 @@ func (p *staticPolicy) Allocate(ctx context.Context, s state.State, pod *v1.Pod,
 	// we only do this so that the sum(memory_for_all_containers) == total amount of allocated memory to the pod, even
 	// though the final state here doesn't accurately reflect what was (in reality) allocated to each container
 	// TODO: we should refactor our state structs to reflect the amount of the re-used memory
-	p.updateInitContainersMemoryBlocks(logger, s, pod, container, containerBlocks)
+	p.updateInitContainersMemoryBlocks(logger, s, pod, container, containerBlocks, reusableByContainer)
 	metrics.ResourceManagerContainerAssignments.WithLabelValues(metrics.ResourceManagerMemory, metrics.ResourceManagerExclusiveNode).Inc()
 
 	logger.V(4).Info("Allocated exclusive memory")
@@ -1041,6 +1028,13 @@ func (p *staticPolicy) calculateHints(machineState state.NUMANodeMap, pod *v1.Po
 	minAffinitySize := len(numaNodes)
 
 	hints := map[string][]topologymanager.TopologyHint{}
+	if topologymanager.ResolveNUMAPlacement(pod).Independent {
+		// An absent resource hint means no preference. An exhausted memory
+		// group must instead make every singleton candidate infeasible.
+		for resourceName := range requestedResources {
+			hints[string(resourceName)] = []topologymanager.TopologyHint{}
+		}
+	}
 	bitmask.IterateBitMasks(numaNodes, func(mask bitmask.BitMask) {
 		maskBits := mask.GetBits()
 		singleNUMAHint := len(maskBits) == 1
@@ -1540,7 +1534,7 @@ func (p *staticPolicy) updatePodReusableMemory(pod *v1.Pod, container *v1.Contai
 	}
 }
 
-func (p *staticPolicy) updateInitContainersMemoryBlocks(logger klog.Logger, s state.State, pod *v1.Pod, container *v1.Container, containerMemoryBlocks []state.Block) {
+func (p *staticPolicy) updateInitContainersMemoryBlocks(logger klog.Logger, s state.State, pod *v1.Pod, container *v1.Container, containerMemoryBlocks []state.Block, reusableByContainer map[string]map[v1.ResourceName]uint64) {
 	podUID := string(pod.UID)
 
 	for _, containerBlock := range containerMemoryBlocks {
@@ -1580,18 +1574,90 @@ func (p *staticPolicy) updateInitContainersMemoryBlocks(logger klog.Logger, s st
 					continue
 				}
 
-				if initContainerBlock.Size > blockSize {
-					initContainerBlock.Size -= blockSize
-					blockSize = 0
-				} else {
-					blockSize -= initContainerBlock.Size
-					initContainerBlock.Size = 0
+				reusable := initContainerBlock.Size
+				if reusableByContainer != nil {
+					reusable = min(reusable, reusableByContainer[initContainer.Name][initContainerBlock.Type])
 				}
+				reused := min(reusable, blockSize)
+				initContainerBlock.Size -= reused
+				blockSize -= reused
 			}
 
 			s.SetMemoryBlocks(podUID, initContainer.Name, initContainerBlocks)
 		}
 	}
+}
+
+// Future memory can cover a sequential init's peak without overlapping its
+// lifetime. Missing assignments contribute demand, but are not reservations yet.
+func getFutureNUMAMemory(logger klog.Logger, s state.Reader, pod *v1.Pod, container *v1.Container) (map[v1.ResourceName]uint64, map[v1.ResourceName]uint64, error) {
+	reserved := make(map[v1.ResourceName]uint64)
+	future := *pod
+	future.Spec = pod.Spec
+	future.Spec.InitContainers = nil
+	afterCurrent := false
+	for sibling := range podutil.ContainerIter(&pod.Spec, podutil.InitContainers|podutil.Containers) {
+		if sibling.Name == container.Name {
+			afterCurrent = true
+			continue
+		}
+		if !afterCurrent || topologymanager.NUMAContainersOverlap(pod, container, sibling) {
+			continue
+		}
+		for _, block := range s.GetMemoryBlocks(string(pod.UID), sibling.Name) {
+			reserved[block.Type] += block.Size
+		}
+		for _, init := range pod.Spec.InitContainers {
+			if init.Name == sibling.Name && !topologymanager.NUMAInitContainerCompleted(pod, &init) {
+				future.Spec.InitContainers = append(future.Spec.InitContainers, init)
+			}
+		}
+	}
+	requested, err := getPodRequestedResources(logger, &future)
+	return reserved, requested, err
+}
+
+func (p *staticPolicy) independentReusableMemory(logger klog.Logger, s state.Reader, pod *v1.Pod, container *v1.Container) (map[string]map[v1.ResourceName]uint64, error) {
+	reusable := make(map[string]map[v1.ResourceName]uint64)
+	podReusable := make(map[string]map[v1.ResourceName]uint64)
+	for _, init := range pod.Spec.InitContainers {
+		if init.Name == container.Name {
+			break
+		}
+		if !isRegularInitContainer(pod, &init) {
+			continue
+		}
+		requested, err := getContainerRequestedResources(logger, pod, &init)
+		if err != nil {
+			return nil, err
+		}
+		reserved, future, err := getFutureNUMAMemory(logger, s, pod, &init)
+		if err != nil {
+			return nil, err
+		}
+		reusable[init.Name] = make(map[v1.ResourceName]uint64)
+		for _, block := range s.GetMemoryBlocks(string(pod.UID), init.Name) {
+			protected := uint64(0)
+			if !topologymanager.NUMAInitContainerCompleted(pod, &init) {
+				amount := requested[block.Type]
+				protected = amount - min(amount, max(reserved[block.Type], future[block.Type]))
+			}
+			// Preserve the residual needed for an unfinished init. Reusing it
+			// again after partial restoration would under-reserve its peak.
+			available := block.Size - min(block.Size, protected)
+			reusable[init.Name][block.Type] = available
+			mask, err := bitmask.NewBitMask(block.NUMAAffinity...)
+			if err != nil {
+				return nil, err
+			}
+			if podReusable[mask.String()] == nil {
+				podReusable[mask.String()] = make(map[v1.ResourceName]uint64)
+			}
+			podReusable[mask.String()][block.Type] += available
+		}
+	}
+	p.initContainersReusableMemory[string(pod.UID)] = podReusable
+	return reusable, nil
 }
 
 func isRegularInitContainer(pod *v1.Pod, container *v1.Container) bool {

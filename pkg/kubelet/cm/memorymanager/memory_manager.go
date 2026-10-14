@@ -384,6 +384,30 @@ func (m *manager) checkNUMAPlacement(pod *v1.Pod, container *v1.Container) error
 			return fmt.Errorf("%s assignment is missing for requested NUMA node %d", resourceName, placement.Memory)
 		}
 	}
+	return m.checkInitNUMACoverage(pod, container, true)
+}
+
+func (m *manager) checkInitNUMACoverage(pod *v1.Pod, container *v1.Container, allowMissing bool) error {
+	if !topologymanager.ResolveNUMAPlacement(pod).Independent || !isRegularInitContainer(pod, container) || topologymanager.NUMAInitContainerCompleted(pod, container) {
+		return nil
+	}
+	requested, err := getContainerRequestedResources(klog.Background(), pod, container)
+	if err != nil {
+		return err
+	}
+	reserved, future, err := getFutureNUMAMemory(klog.Background(), m.state, pod, container)
+	if err != nil {
+		return err
+	}
+	for _, block := range m.state.GetMemoryBlocks(string(pod.UID), container.Name) {
+		coverage := reserved[block.Type]
+		if allowMissing {
+			coverage = max(coverage, future[block.Type])
+		}
+		if amount := requested[block.Type]; block.Size < amount && coverage < amount-block.Size {
+			return fmt.Errorf("container %s: insufficient restored %s coverage for unfinished init: reserved %d bytes, need %d", container.Name, block.Type, block.Size+coverage, amount)
+		}
+	}
 	return nil
 }
 
@@ -548,7 +572,10 @@ func (m *manager) ValidateNUMAPlacement(pod *v1.Pod, container *v1.Container) er
 	if len(blocks) == 0 {
 		return fmt.Errorf("memory allocation for requested NUMA node %d is missing", placement.Memory)
 	}
-	return m.checkNUMAPlacement(pod, container)
+	if err := m.checkNUMAPlacement(pod, container); err != nil {
+		return err
+	}
+	return m.checkInitNUMACoverage(pod, container, false)
 }
 
 func (m *manager) ReleaseNUMAPlacement(logger klog.Logger, pod *v1.Pod, container *v1.Container) error {

@@ -124,8 +124,16 @@ python3 capture.py --output "$RUN/commands/topology" -- \
 The sidecar starts first, then the sequential init. Each probe touches private
 anonymous pages (and each hugetlb file for the hugepage fixture), writes
 `/tmp/numa-evidence/observation.json`, raw proc status/maps/numa_maps, and waits.
+Artifacts are published by atomic rename after close. Before copying, poll for
+`/tmp/numa-evidence/numa_maps.txt` with `kubectl exec ... -- test -s PATH` on
+each running container; bound the wait by `hold_seconds` and inspect Pod
+termination status if it exits. Ready alone does not imply the probe finished
+touching memory. Namespace/Pod identity comes from the downward API and is
+matched to mask evidence in every placement/lifecycle report row.
 The init waits for `/tmp/numa-release`; inspect it **before** releasing it.
 Allocation failure exits nonzero; the observation records the failed resource.
+Fatal SIGBUS/OOM or interrupted artifact writes may leave only `.tmp` files;
+save stderr and Pod termination details and report the incomplete observation.
 The probe never invokes bind or migration APIs. `move_pages` uses NULL nodes
 and flags zero, querying evenly spaced pages including both endpoints. The
 observation gives mapping addresses, byte lengths, total/sample counts, errors

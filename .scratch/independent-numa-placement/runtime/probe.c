@@ -30,7 +30,7 @@ static const char *directory = "/tmp/numa-evidence";
 static FILE *artifact(const char *name)
 {
     char path[4096];
-    if (snprintf(path, sizeof(path), "%s/%s", directory, name) >= (int)sizeof(path)) {
+    if (snprintf(path, sizeof(path), "%s/%s.tmp", directory, name) >= (int)sizeof(path)) {
         fprintf(stderr, "evidence path too long\n");
         exit(2);
     }
@@ -39,13 +39,17 @@ static FILE *artifact(const char *name)
     return file;
 }
 
-static void finish(FILE *file)
+static void finish(FILE *file, const char *name)
 {
     int error = ferror(file);
     if (fclose(file) != 0 || error) {
         fprintf(stderr, "cannot persist probe evidence under %s: %s\n", directory, strerror(errno));
         exit(2);
     }
+    char path[4096], target[4096];
+    snprintf(path, sizeof(path), "%s/%s.tmp", directory, name);
+    snprintf(target, sizeof(target), "%s/%s", directory, name);
+    if (rename(path, target)) { perror(target); exit(2); }
 }
 
 static size_t quantity(const char *text)
@@ -92,7 +96,7 @@ static void proc_evidence(void)
         }
         if (ferror(input)) { perror(path); exit(2); }
         fclose(input);
-        finish(output);
+        finish(output, name);
     }
 #endif
 }
@@ -132,6 +136,14 @@ int main(int argc, char **argv)
     unsigned int hold = 3600;
     const char *release = NULL;
     const char *container = "standalone";
+    const char *pod = getenv("NUMA_POD_NAME");
+    const char *namespace = getenv("NUMA_NAMESPACE");
+    if (!pod) pod = "standalone";
+    if (!namespace) namespace = "standalone";
+    if (strspn(pod, "abcdefghijklmnopqrstuvwxyz0123456789.-") != strlen(pod) ||
+        strspn(namespace, "abcdefghijklmnopqrstuvwxyz0123456789-") != strlen(namespace)) {
+        fprintf(stderr, "NUMA_POD_NAME/NUMA_NAMESPACE must be valid Kubernetes names\n"); return 2;
+    }
     const char *paths[16], *names[16];
     size_t sizes[16];
     size_t page_sizes[16];
@@ -168,9 +180,10 @@ int main(int argc, char **argv)
     }
     if (mkdir(directory, 0700) != 0) { perror(directory); return 2; }
     FILE *file = artifact("observation.json");
-    fprintf(file, "{\"schema_version\":1,\"container\":\"%s\",\"pid\":%ld,\"observed_unix\":%lld,"
+    fprintf(file, "{\"schema_version\":1,\"container\":\"%s\",\"pod\":\"%s\",\"namespace\":\"%s\","
+            "\"pid\":%ld,\"observed_unix\":%lld,"
             "\"method\":\"move_pages query only\",\"page_size\":%ld,\"mappings\":[",
-            container, (long)getpid(), (long long)time(NULL), sysconf(_SC_PAGESIZE));
+            container, pod, namespace, (long)getpid(), (long long)time(NULL), sysconf(_SC_PAGESIZE));
     void *mappings[17];
     size_t lengths[17];
     int failed = 0, allocated = 0;
@@ -211,7 +224,7 @@ int main(int argc, char **argv)
         lengths[allocated++] = length;
     }
     fprintf(file, "],\"allocation_status\":\"%s\",\"phase\":\"touched\"}\n", failed ? "FAIL" : "PASS");
-    finish(file);
+    finish(file, "observation.json");
     proc_evidence();
     if (!failed) {
         while (hold-- && (!release || access(release, F_OK) != 0)) sleep(1);

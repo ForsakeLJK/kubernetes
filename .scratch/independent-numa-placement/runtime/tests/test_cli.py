@@ -150,16 +150,18 @@ class EvidenceCLI(unittest.TestCase):
         case["evidence"].update(manifest=["manifests/explicit.json"], commands=["command-01"],
                                 pod=["raw.txt"], selection=["raw.txt"])
         for role in ["init", "sidecar", "app-a", "app-b"]:
-            mask = {"status": "PASS", "pod": "numa-explicit", "container": role, "cpu_node": 0,
+            mask = {"status": "PASS", "pod": "numa-explicit", "namespace": "numa-validation", "container": role, "cpu_node": 0,
                     "memory_node": 3, "node_cpus": "8-11,24", "cpus": [8], "memory_nodes": [3],
                     "raw_status": "Cpus_allowed_list: 8\nMems_allowed_list: 3\n"}
             (run / (role + "-mask.json")).write_text(json.dumps(mask))
             case["evidence"]["masks"].append(role + "-mask.json")
-            observation = {"pid": 1, "container": role, "phase": "touched", "observed_unix": 1,
+            observation = {"pid": 1, "container": role, "pod": "numa-explicit", "namespace": "numa-validation",
+                           "phase": "touched", "observed_unix": 1,
                            "method": "move_pages query only", "page_size": 4096, "allocation_status": "PASS",
                            "mappings": [{"name": "anonymous", "backing": "private-anonymous", "start": "0x10000", "bytes": 4096,
                                          "total_pages": 1, "sampled_pages": 1, "errno": 0, "page_nodes": [3]}]}
-            evidence = {"status": "PASS", "container": role, "memory_node": 3, "observation": observation}
+            evidence = {"status": "PASS", "container": role, "pod": "numa-explicit", "namespace": "numa-validation",
+                        "memory_node": 3, "observation": observation}
             (run / (role + "-residency.json")).write_text(json.dumps(evidence))
             case["evidence"]["residency"].append(role + "-residency.json")
         (run / "cases.json").write_text(json.dumps(records))
@@ -248,6 +250,53 @@ class EvidenceCLI(unittest.TestCase):
         result = self.cli(ROOT / "check-residency.py", observation, "--memory-node", 3,
                           "--hugepage-size", "2Mi", "--hugepage-size", "1Gi")
         self.assertEqual(result.returncode, 2)
+
+    def test_report_applies_mask_residency_consistency_to_lifecycle_cases(self):
+        run = self.prepared_report_run()
+        cases_path = run / "cases.json"
+        cases = json.loads(cases_path.read_text())
+        evidence = cases["cases"][0]["evidence"]
+        for case in cases["cases"]:
+            if case["id"] == "unrelated-update":
+                case.update(result="PASS", reason="synthetic update", evidence=evidence)
+        cases_path.write_text(json.dumps(cases))
+        for role in ["init", "sidecar", "app-a", "app-b"]:
+            path = run / (role + "-residency.json")
+            record = json.loads(path.read_text())
+            record["memory_node"] = 7
+            record["observation"]["mappings"][0]["page_nodes"] = [7]
+            path.write_text(json.dumps(record))
+        result = self.cli(ROOT / "report.py", "--run", run, "--output", run / "report-update")
+        report = json.loads((run / "report-update/report.json").read_text())
+        update = next(case for case in report["cases"] if case["id"] == "unrelated-update")
+        self.assertEqual(update["result"], "FAIL", update)
+
+    def test_report_does_not_pass_hugepages_without_provisioned_sizes(self):
+        run = self.prepared_report_run()
+        config_path = run / "config.json"
+        config = json.loads(config_path.read_text())
+        config["hugepages"] = []
+        config_path.write_text(json.dumps(config))
+        cases_path = run / "cases.json"
+        cases = json.loads(cases_path.read_text())
+        evidence = cases["cases"][0]["evidence"].copy()
+        evidence["capacity"] = ["raw.txt"]
+        for case in cases["cases"]:
+            if case["id"] == "hugepages":
+                case.update(result="PASS", reason="synthetic unavailable pages", evidence=evidence)
+        cases_path.write_text(json.dumps(cases))
+        result = self.cli(ROOT / "report.py", "--run", run, "--output", run / "report-no-pages")
+        report = json.loads((run / "report-no-pages/report.json").read_text())
+        pages = next(case for case in report["cases"] if case["id"] == "hugepages")
+        self.assertEqual(pages["result"], "NOT RUN", pages)
+
+    def test_malformed_command_json_is_incomplete_evidence_with_a_report(self):
+        run = self.prepared_report_run()
+        (run / "command-01/command.json").write_text("[]")
+        result = self.cli(ROOT / "report.py", "--run", run, "--output", run / "report-bad-command")
+        self.assertEqual(result.returncode, 2, result.stderr)
+        report = json.loads((run / "report-bad-command/report.json").read_text())
+        self.assertEqual(report["cases"][0]["result"], "NOT RUN")
 
 
 if __name__ == "__main__":

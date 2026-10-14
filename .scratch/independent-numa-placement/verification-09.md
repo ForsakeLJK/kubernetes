@@ -27,10 +27,8 @@ is acknowledged without inventing commands or outputs.
 Ticket09 explicitly requests checker/report output handling tests. New tests
 use these public CLI boundaries, saved files and exit status; report setup also
 exercises fixture generation and real command capture at the external boundary.
-An optional request to expand agreement to all three CLIs was sent; no expanded
-agreement is inferred from silence. The required checker/report seams come
-from the ticket itself. Synthetic inputs are labelled and never represent
-live NUMA evidence.
+The required checker/report seams come from the ticket itself. Synthetic inputs
+are labelled and never represent live NUMA evidence.
 
 Observed failing checks before corrections:
 
@@ -82,3 +80,12 @@ these observations. Ticket10 owns paired STREAM automation.
 ## Review
 
 Standards and Spec reviews against the starting commit are pending.
+
+Initial independent review found one placement-consistency issue on the
+Standards axis and two evidence-handling issues on the Spec axis: residency
+cross-checking did not cover lifecycle rows, absent hugepage prerequisites
+could pass, and a non-object command record aborted reporting. Each issue was
+reproduced with a failing CLI regression and corrected. Reports now correlate
+namespace/Pod/container identities, require configured hugepage prerequisites,
+and preserve a NOT RUN case for malformed command evidence. Probe artifacts
+also publish atomically, avoiding partial reads during observation collection.

@@ -42,6 +42,7 @@ def main() -> int:
         observation = json.loads(raw)
         status, reasons = assess(observation, args.memory_node, args.hugepage_size)
         result.update(status=status, reasons=reasons, container=observation["container"],
+                      pod=observation.get("pod"), namespace=observation.get("namespace"),
                       source_sha256=hashlib.sha256(raw).hexdigest(), observation=observation)
     except (OSError, ValueError, KeyError, TypeError) as error:
         result["reasons"] = [f"incomplete residency evidence {args.observation}: {error}"]

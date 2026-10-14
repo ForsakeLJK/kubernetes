@@ -54,6 +54,8 @@ def record_file(run: Path, name: str, hashes: dict[str, str], allow_empty: bool 
 
 def command_evidence(run: Path, name: str, hashes: dict[str, str]) -> None:
     command = json.loads(record_file(run, name + "/command.json", hashes).read_text())
+    if not isinstance(command, dict):
+        raise ValueError(f"command capture must contain a JSON object: {name}")
     if (command.get("status") != "completed" or type(command.get("returncode")) is not int
             or not isinstance(command.get("command"), list) or not command["command"]
             or not all(isinstance(part, str) for part in command["command"])):
@@ -119,6 +121,8 @@ def case_report(run: Path, case: dict[str, Any], config: dict[str, Any], env_iss
     if requested == "NOT RUN":
         return result
     issues.extend(env_issues)
+    if case["id"] in ["hugepages", "hugepage-exhaustion"] and not config["hugepages"]:
+        issues.append("missing provisioned hugepage sizes; this prerequisite cannot pass")
     failed = requested == "FAIL"
     mask_records, residency_records = [], []
     for slot in CASES[case["id"]]:
@@ -165,6 +169,18 @@ def case_report(run: Path, case: dict[str, Any], config: dict[str, Any], env_iss
             roles = {record.get("container") for record in records}
             if not ROLES <= roles:
                 issues.append(f"missing {label} for containers {sorted(ROLES - roles)}")
+        for record in residency_records:
+            identity = (record.get("namespace"), record.get("pod"), record.get("container"))
+            if not all(isinstance(value, str) and value for value in identity):
+                issues.append("missing namespace/Pod/container identity in residency record")
+                continue
+            matching = [mask for mask in mask_records if
+                        (mask.get("namespace"), mask.get("pod"), mask.get("container")) == identity]
+            if not matching:
+                issues.append(f"missing mask for residency identity {identity}")
+            elif any(mask["memory_node"] != record["memory_node"] for mask in matching):
+                failed = True
+                issues.append(f"residency target differs from observed memory mask for {identity}")
     if case["id"] in [*FORMS, "memory-only-node"] and mask_records:
         pairs = {(record["cpu_node"], record["memory_node"]) for record in mask_records}
         if len(pairs) != 1:

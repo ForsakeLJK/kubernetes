@@ -112,6 +112,8 @@ def manifest(config: dict[str, Any], form: str, name: str, single: bool) -> dict
             command += ["--hugepage", page["size"], mount + "/" + name, str(page["bytes"])]
             mounts.append({"name": f"pages-{index}", "mountPath": mount})
         item = {"name": name, "image": config["image"], "command": command,
+                "env": [{"name": "NUMA_POD_NAME", "valueFrom": {"fieldRef": {"fieldPath": "metadata.name"}}},
+                        {"name": "NUMA_NAMESPACE", "valueFrom": {"fieldRef": {"fieldPath": "metadata.namespace"}}}],
                 "resources": {"requests": resources.copy(), "limits": resources.copy()}}
         if name == "sidecar":
             item["restartPolicy"] = "Always"

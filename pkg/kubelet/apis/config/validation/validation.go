@@ -20,6 +20,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"regexp"
+	"runtime"
 	"slices"
 	"time"
 	"unicode"
@@ -215,8 +216,15 @@ func ValidateKubeletConfiguration(kc *kubeletconfig.KubeletConfiguration, featur
 	case kubeletconfig.BestEffortTopologyManagerPolicy:
 	case kubeletconfig.RestrictedTopologyManagerPolicy:
 	case kubeletconfig.SingleNumaNodeTopologyManagerPolicy:
+	case kubeletconfig.IndependentNUMATopologyManagerPolicy:
+		if runtime.GOOS != "linux" {
+			allErrors = append(allErrors, fmt.Errorf("invalid configuration: independent-numa requires Linux"))
+		}
+		if kc.TopologyManagerScope != kubeletconfig.PodTopologyManagerScope {
+			allErrors = append(allErrors, fmt.Errorf("invalid configuration: independent-numa requires topologyManagerScope pod"))
+		}
 	default:
-		allErrors = append(allErrors, fmt.Errorf("invalid configuration: topologyManagerPolicy (--topology-manager-policy) %q must be one of: %q", kc.TopologyManagerPolicy, []string{kubeletconfig.NoneTopologyManagerPolicy, kubeletconfig.BestEffortTopologyManagerPolicy, kubeletconfig.RestrictedTopologyManagerPolicy, kubeletconfig.SingleNumaNodeTopologyManagerPolicy}))
+		allErrors = append(allErrors, fmt.Errorf("invalid configuration: topologyManagerPolicy (--topology-manager-policy) %q must be one of: %q", kc.TopologyManagerPolicy, []string{kubeletconfig.NoneTopologyManagerPolicy, kubeletconfig.BestEffortTopologyManagerPolicy, kubeletconfig.RestrictedTopologyManagerPolicy, kubeletconfig.SingleNumaNodeTopologyManagerPolicy, kubeletconfig.IndependentNUMATopologyManagerPolicy}))
 	}
 
 	switch kc.TopologyManagerScope {

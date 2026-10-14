@@ -68,6 +68,9 @@ const (
 	// SingleNumaNodeTopologyManagerPolicy is a mode in which kubelet only allows
 	// pods with a single NUMA alignment of CPU and device resources.
 	SingleNumaNodeTopologyManagerPolicy = "single-numa-node"
+	// IndependentNUMATopologyManagerPolicy coordinates resource-specific placement
+	// on Linux with pod scope. Ordinary and legacy Pods retain single-node alignment.
+	IndependentNUMATopologyManagerPolicy = "independent-numa"
 	// ContainerTopologyManagerScope represents that
 	// topology policy is applied on a per-container basis.
 	ContainerTopologyManagerScope = "container"
@@ -501,6 +504,8 @@ type KubeletConfiguration struct {
 	// - `none`: kubelet has no knowledge of NUMA alignment of a pod's CPU and device resources.
 	// - `single-numa-node`: kubelet only allows pods with a single NUMA alignment
 	//   of CPU and device resources.
+	// - `independent-numa`: Linux with pod scope; ordinary pods and legacy numaNode
+	//   pods retain single-node alignment.
 	//
 	// Default: "none"
 	// +optional

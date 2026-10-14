@@ -1,5 +1,5 @@
 /*
-Copyright 2026 The Kubernetes Authors.
+Copyright The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -23,6 +23,7 @@ import (
 
 	cadvisorapi "github.com/google/cadvisor/lib/model"
 	"k8s.io/kubernetes/pkg/kubelet/cm"
+	"k8s.io/kubernetes/pkg/kubelet/cm/topologymanager"
 	"k8s.io/kubernetes/pkg/kubelet/lifecycle"
 )
 
@@ -41,11 +42,12 @@ func (h *numaPlacementAdmitHandler) Admit(_ context.Context, attrs *lifecycle.Po
 		return lifecycle.PodAdmitResult{Admit: true}
 	}
 	id := *attrs.Pod.Spec.NUMANode
+	policySupported := h.config.TopologyManagerPolicy == topologymanager.PolicySingleNumaNode || h.config.TopologyManagerPolicy == topologymanager.PolicyIndependentNUMA
 	if h.goos != "linux" || h.config.CPUManagerPolicy != "static" || h.config.MemoryManagerPolicy != "Static" ||
-		h.config.TopologyManagerPolicy != "single-numa-node" || h.config.TopologyManagerScope != "pod" {
+		!policySupported || h.config.TopologyManagerScope != "pod" {
 		return lifecycle.PodAdmitResult{
 			Reason:  "NUMAPlacementUnsupported",
-			Message: fmt.Sprintf("NUMA node %d requires Linux, CPU Manager static, Memory Manager Static, and Topology Manager single-numa-node with pod scope", id),
+			Message: fmt.Sprintf("NUMA node %d requires Linux, CPU Manager static, Memory Manager Static, and Topology Manager single-numa-node or independent-numa with pod scope", id),
 		}
 	}
 	info, err := h.getMachineInfo()

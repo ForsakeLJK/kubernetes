@@ -76379,7 +76379,7 @@ func schema_k8sio_kubelet_config_v1beta1_KubeletConfiguration(ref common.Referen
 					},
 					"topologyManagerPolicy": {
 						SchemaProps: spec.SchemaProps{
-							Description: "topologyManagerPolicy is the name of the topology manager policy to use. Valid values include:\n\n- `restricted`: kubelet only allows pods with optimal NUMA node alignment for\n  requested resources;\n- `best-effort`: kubelet will favor pods with NUMA alignment of CPU and device\n  resources;\n- `none`: kubelet has no knowledge of NUMA alignment of a pod's CPU and device resources. - `single-numa-node`: kubelet only allows pods with a single NUMA alignment\n  of CPU and device resources.\n\nDefault: \"none\"",
+							Description: "topologyManagerPolicy is the name of the topology manager policy to use. Valid values include:\n\n- `restricted`: kubelet only allows pods with optimal NUMA node alignment for\n  requested resources;\n- `best-effort`: kubelet will favor pods with NUMA alignment of CPU and device\n  resources;\n- `none`: kubelet has no knowledge of NUMA alignment of a pod's CPU and device resources. - `single-numa-node`: kubelet only allows pods with a single NUMA alignment\n  of CPU and device resources.\n- `independent-numa`: Linux with pod scope; ordinary pods and legacy numaNode\n  pods retain single-node alignment.\n\nDefault: \"none\"",
 							Type:        []string{"string"},
 							Format:      "",
 						},

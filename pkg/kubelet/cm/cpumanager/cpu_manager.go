@@ -25,6 +25,7 @@ import (
 
 	cadvisorapi "github.com/google/cadvisor/lib/model"
 	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	resourcehelper "k8s.io/component-helpers/resource"
@@ -728,6 +729,13 @@ func (m *manager) GetPodCPUs(podUID string) cpuset.CPUSet {
 
 func (m *manager) GetCPUAffinity(podUID, containerName string) cpuset.CPUSet {
 	return m.state.GetCPUSetOrDefault(podUID, containerName)
+}
+
+// GetCPUNUMANodes reports concrete CPU locality, including the shared pool for
+// containers without an exclusive assignment. Hints alone cannot establish it.
+func (m *manager) GetCPUNUMANodes(podUID, containerName string) sets.Set[int] {
+	cpus := m.GetCPUAffinity(podUID, containerName)
+	return sets.New(m.topology.CPUDetails.KeepOnly(cpus).NUMANodes().List()...)
 }
 
 func resourcesQualifyForExclusiveCPUs(container *v1.Container) bool {

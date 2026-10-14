@@ -19,6 +19,7 @@ package topologymanager
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"time"
 
 	cadvisorapi "github.com/google/cadvisor/lib/model"
@@ -193,6 +194,14 @@ var _ Manager = &manager{}
 
 // NewManager creates a new TopologyManager based on provided policy and scope
 func NewManager(logger klog.Logger, topology []cadvisorapi.Node, topologyPolicyName string, topologyScopeName string, topologyPolicyOptions map[string]string) (Manager, error) {
+	if topologyPolicyName == PolicyIndependentNUMA {
+		if runtime.GOOS != "linux" {
+			return nil, fmt.Errorf("topology manager %s policy requires Linux", PolicyIndependentNUMA)
+		}
+		if topologyScopeName != PodTopologyScope {
+			return nil, fmt.Errorf("topology manager %s policy requires pod scope", PolicyIndependentNUMA)
+		}
+	}
 	// When policy is none, the scope is not relevant, so we can short circuit here.
 	if topologyPolicyName == PolicyNone {
 		logger.Info("Creating topology manager with none policy")
@@ -226,6 +235,8 @@ func NewManager(logger klog.Logger, topology []cadvisorapi.Node, topologyPolicyN
 
 	case PolicySingleNumaNode:
 		policy = NewSingleNumaNodePolicy(numaInfo, opts)
+	case PolicyIndependentNUMA:
+		policy = NewIndependentNUMAPolicy(numaInfo, opts)
 
 	default:
 		return nil, fmt.Errorf("unknown policy: \"%s\"", topologyPolicyName)

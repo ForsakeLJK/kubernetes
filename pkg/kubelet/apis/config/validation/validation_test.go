@@ -98,6 +98,30 @@ var (
 	}
 )
 
+func TestIndependentNUMAConfiguration(t *testing.T) {
+	featureGate := utilfeature.DefaultFeatureGate.DeepCopy()
+	logsapi.AddFeatureGates(featureGate)
+	for _, scope := range []string{"pod", "container"} {
+		t.Run(scope, func(t *testing.T) {
+			config := successConfig.DeepCopy()
+			config.TopologyManagerPolicy = "independent-numa"
+			config.TopologyManagerScope = scope
+			err := validation.ValidateKubeletConfiguration(config, featureGate)
+			if goruntime.GOOS != "linux" {
+				if err == nil || !strings.Contains(err.Error(), "independent-numa requires Linux") {
+					t.Fatalf("configuration error = %v, want Linux requirement", err)
+				}
+			} else if scope != "pod" {
+				if err == nil || !strings.Contains(err.Error(), "independent-numa requires topologyManagerScope pod") {
+					t.Fatalf("configuration error = %v, want pod scope requirement", err)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func TestValidateKubeletConfiguration(t *testing.T) {
 	featureGate := utilfeature.DefaultFeatureGate.DeepCopy()
 	logsapi.AddFeatureGates(featureGate)
@@ -334,7 +358,7 @@ func TestValidateKubeletConfiguration(t *testing.T) {
 			conf.TopologyManagerPolicy = "invalid-policy"
 			return conf
 		},
-		errMsg: "invalid configuration: topologyManagerPolicy (--topology-manager-policy) \"invalid-policy\" must be one of: [\"none\" \"best-effort\" \"restricted\" \"single-numa-node\"]",
+		errMsg: "invalid configuration: topologyManagerPolicy (--topology-manager-policy) \"invalid-policy\" must be one of: [\"none\" \"best-effort\" \"restricted\" \"single-numa-node\" \"independent-numa\"]",
 	}, {
 		name: "invalid TopologyManagerScope",
 		configure: func(conf *kubeletconfig.KubeletConfiguration) *kubeletconfig.KubeletConfiguration {

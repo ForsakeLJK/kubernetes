@@ -68,6 +68,9 @@ const (
 	// SingleNumaNodeTopologyManagerPolicy is a mode in which kubelet only allows
 	// pods with a single NUMA alignment of CPU and device resources.
 	SingleNumaNodeTopologyManagerPolicy = "single-numa-node"
+	// IndependentNUMATopologyManagerPolicy coordinates resource-specific placement
+	// on Linux with pod scope. Ordinary and legacy Pods retain single-node alignment.
+	IndependentNUMATopologyManagerPolicy = "independent-numa"
 	// ContainerTopologyManagerScope represents that
 	// topology policy is applied on a per-container basis.
 	ContainerTopologyManagerScope = "container"
@@ -321,6 +324,8 @@ type KubeletConfiguration struct {
 	// Requires the MemoryManager feature gate to be enabled.
 	MemoryManagerPolicy string
 	// TopologyManagerPolicy is the name of the policy to use.
+	// independent-numa requires Linux and pod scope; ordinary and legacy numaNode
+	// Pods retain single-node alignment.
 	TopologyManagerPolicy string
 	// TopologyManagerScope represents the scope of topology hint generation
 	// that topology manager requests and hint providers generate.

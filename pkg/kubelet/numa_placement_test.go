@@ -1,5 +1,5 @@
 /*
-Copyright 2026 The Kubernetes Authors.
+Copyright The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -30,59 +30,63 @@ import (
 )
 
 func TestNUMAPlacementAdmission(t *testing.T) {
-	config := cm.NodeConfig{
-		CPUManagerPolicy:      "static",
-		MemoryManagerPolicy:   "Static",
-		TopologyManagerPolicy: "single-numa-node",
-		TopologyManagerScope:  "pod",
-	}
-	withoutPolicy := func(change func(*cm.NodeConfig)) cm.NodeConfig {
-		copy := config
-		change(&copy)
-		return copy
-	}
-	info := &cadvisorapi.MachineInfo{Topology: []cadvisorapi.Node{{Id: 0}, {Id: 2}}}
-	for _, tc := range []struct {
-		name            string
-		id              *int32
-		goos            string
-		config          cm.NodeConfig
-		want            string
-		missingInfo     bool
-		singleContainer bool
-	}{
-		{name: "omitted", goos: "windows", want: ""},
-		{name: "zero exists", id: numaTestID(0), goos: "linux", config: config},
-		{name: "noncontiguous ID exists", id: numaTestID(2), goos: "linux", config: config},
-		{name: "hole does not exist", id: numaTestID(1), goos: "linux", config: config, want: "NUMANodeNotFound"},
-		{name: "unsupported CPU policy", id: numaTestID(0), goos: "linux", config: withoutPolicy(func(c *cm.NodeConfig) { c.CPUManagerPolicy = "none" }), want: "NUMAPlacementUnsupported"},
-		{name: "unsupported memory policy", id: numaTestID(0), goos: "linux", config: withoutPolicy(func(c *cm.NodeConfig) { c.MemoryManagerPolicy = "None" }), want: "NUMAPlacementUnsupported"},
-		{name: "unsupported topology policy", id: numaTestID(0), goos: "linux", config: withoutPolicy(func(c *cm.NodeConfig) { c.TopologyManagerPolicy = "best-effort" }), want: "NUMAPlacementUnsupported"},
-		{name: "unsupported topology scope", id: numaTestID(0), goos: "linux", config: withoutPolicy(func(c *cm.NodeConfig) { c.TopologyManagerScope = "container" }), want: "NUMAPlacementUnsupported"},
-		{name: "unsupported OS", id: numaTestID(0), goos: "windows", config: config, want: "NUMAPlacementUnsupported"},
-		{name: "topology unavailable", id: numaTestID(0), goos: "linux", config: config, missingInfo: true, want: "NUMAPlacementUnsupported"},
-		{name: "single container is supported", id: numaTestID(2), goos: "linux", config: config, want: "", singleContainer: true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			h := &numaPlacementAdmitHandler{goos: tc.goos, config: tc.config, getMachineInfo: func() (*cadvisorapi.MachineInfo, error) {
-				if tc.missingInfo {
-					return nil, nil
-				}
-				return info, nil
-			}}
-			pod := &v1.Pod{Spec: v1.PodSpec{NUMANode: tc.id}}
-			if tc.singleContainer {
-				pod.Spec.Containers = []v1.Container{{Name: "workload"}}
+	for _, policy := range []string{"single-numa-node", "independent-numa"} {
+		t.Run(policy, func(t *testing.T) {
+			config := cm.NodeConfig{
+				CPUManagerPolicy:      "static",
+				MemoryManagerPolicy:   "Static",
+				TopologyManagerPolicy: policy,
+				TopologyManagerScope:  "pod",
 			}
-			result := h.Admit(context.Background(), &lifecycle.PodAdmitAttributes{Pod: pod})
-			if result.Reason != tc.want || result.Admit != (tc.want == "") {
-				t.Fatalf("admission = %+v, want reason %q", result, tc.want)
+			withoutPolicy := func(change func(*cm.NodeConfig)) cm.NodeConfig {
+				copy := config
+				change(&copy)
+				return copy
 			}
-			if tc.id != nil && tc.want != "" && !strings.Contains(result.Message, fmt.Sprintf("NUMA node %d", *tc.id)) {
-				t.Fatalf("message %q does not identify requested NUMA node", result.Message)
-			}
-			if tc.missingInfo && !strings.Contains(result.Message, "topology information is unavailable") {
-				t.Fatalf("missing topology message is not actionable: %q", result.Message)
+			info := &cadvisorapi.MachineInfo{Topology: []cadvisorapi.Node{{Id: 0}, {Id: 2}}}
+			for _, tc := range []struct {
+				name            string
+				id              *int32
+				goos            string
+				config          cm.NodeConfig
+				want            string
+				missingInfo     bool
+				singleContainer bool
+			}{
+				{name: "omitted", goos: "windows", want: ""},
+				{name: "zero exists", id: numaTestID(0), goos: "linux", config: config},
+				{name: "noncontiguous ID exists", id: numaTestID(2), goos: "linux", config: config},
+				{name: "hole does not exist", id: numaTestID(1), goos: "linux", config: config, want: "NUMANodeNotFound"},
+				{name: "unsupported CPU policy", id: numaTestID(0), goos: "linux", config: withoutPolicy(func(c *cm.NodeConfig) { c.CPUManagerPolicy = "none" }), want: "NUMAPlacementUnsupported"},
+				{name: "unsupported memory policy", id: numaTestID(0), goos: "linux", config: withoutPolicy(func(c *cm.NodeConfig) { c.MemoryManagerPolicy = "None" }), want: "NUMAPlacementUnsupported"},
+				{name: "unsupported topology policy", id: numaTestID(0), goos: "linux", config: withoutPolicy(func(c *cm.NodeConfig) { c.TopologyManagerPolicy = "best-effort" }), want: "NUMAPlacementUnsupported"},
+				{name: "unsupported topology scope", id: numaTestID(0), goos: "linux", config: withoutPolicy(func(c *cm.NodeConfig) { c.TopologyManagerScope = "container" }), want: "NUMAPlacementUnsupported"},
+				{name: "unsupported OS", id: numaTestID(0), goos: "windows", config: config, want: "NUMAPlacementUnsupported"},
+				{name: "topology unavailable", id: numaTestID(0), goos: "linux", config: config, missingInfo: true, want: "NUMAPlacementUnsupported"},
+				{name: "single container is supported", id: numaTestID(2), goos: "linux", config: config, want: "", singleContainer: true},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					h := &numaPlacementAdmitHandler{goos: tc.goos, config: tc.config, getMachineInfo: func() (*cadvisorapi.MachineInfo, error) {
+						if tc.missingInfo {
+							return nil, nil
+						}
+						return info, nil
+					}}
+					pod := &v1.Pod{Spec: v1.PodSpec{NUMANode: tc.id}}
+					if tc.singleContainer {
+						pod.Spec.Containers = []v1.Container{{Name: "workload"}}
+					}
+					result := h.Admit(context.Background(), &lifecycle.PodAdmitAttributes{Pod: pod})
+					if result.Reason != tc.want || result.Admit != (tc.want == "") {
+						t.Fatalf("admission = %+v, want reason %q", result, tc.want)
+					}
+					if tc.id != nil && tc.want != "" && !strings.Contains(result.Message, fmt.Sprintf("NUMA node %d", *tc.id)) {
+						t.Fatalf("message %q does not identify requested NUMA node", result.Message)
+					}
+					if tc.missingInfo && !strings.Contains(result.Message, "topology information is unavailable") {
+						t.Fatalf("missing topology message is not actionable: %q", result.Message)
+					}
+				})
 			}
 		})
 	}

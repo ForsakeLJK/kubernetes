@@ -163,6 +163,13 @@ func TestValidateStaticPolicyOptions(t *testing.T) {
 			expectedErr:   true,
 		},
 		{
+			description:   "Align by socket enabled with independent NUMA",
+			policyOption:  map[string]string{AlignBySocketOption: "true"},
+			topology:      topoDualSocketMultiNumaPerSocketHT,
+			topoMgrPolicy: topologymanager.PolicyIndependentNUMA,
+			expectedErr:   true,
+		},
+		{
 			description:   "Align by socket enabled with num_sockets > num_numa",
 			policyOption:  map[string]string{AlignBySocketOption: "true"},
 			topology:      fakeTopoMultiSocketDualSocketPerNumaHT,
@@ -196,6 +203,8 @@ func TestValidateStaticPolicyOptions(t *testing.T) {
 			topoMgrPolicy := topologymanager.NewNonePolicy()
 			if testCase.topoMgrPolicy == topologymanager.PolicySingleNumaNode {
 				topoMgrPolicy = topologymanager.NewSingleNumaNodePolicy(&topologymanager.NUMAInfo{}, topologymanager.PolicyOptions{})
+			} else if testCase.topoMgrPolicy == topologymanager.PolicyIndependentNUMA {
+				topoMgrPolicy = topologymanager.NewIndependentNUMAPolicy(&topologymanager.NUMAInfo{}, topologymanager.PolicyOptions{})
 			}
 			topoMgrStore := topologymanager.NewFakeManagerWithPolicy(logger, topoMgrPolicy)
 

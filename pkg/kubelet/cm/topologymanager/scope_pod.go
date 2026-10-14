@@ -21,6 +21,7 @@ import (
 	"fmt"
 
 	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/sets"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	resourcehelper "k8s.io/component-helpers/resource"
 	"k8s.io/klog/v2"
@@ -269,7 +270,9 @@ func (s *podScope) checkAffinity(logger klog.Logger, pod *v1.Pod, operation life
 	bestHint, admit := s.calculateAffinity(logger, pod, operation)
 	logger.Info("Best TopologyHint", "bestHint", bestHint, "pod", klog.KObj(pod), "operation", operation)
 	if !admit {
-		if IsAlignmentGuaranteed(s.policy) {
+		if IsAlignmentGuaranteed(s.policy) || s.policy.Name() == PolicyIndependentNUMA {
+			// This path merges a common affinity, including independent-numa's
+			// delegation for ordinary Pods.
 			// Increment failure metric only if alignment was guaranteed.
 			metrics.ContainerAlignedComputeResourcesFailure.WithLabelValues(metrics.AlignScopePod, metrics.AlignedNUMANode).Inc()
 		}
@@ -281,11 +284,39 @@ func (s *podScope) checkAffinity(logger klog.Logger, pod *v1.Pod, operation life
 }
 
 func (s *podScope) updateSuccessMetrics(logger klog.Logger, pod *v1.Pod) {
-	if IsAlignmentGuaranteed(s.policy) {
-		// Increment success metric only if alignment was guaranteed.
-		logger.V(4).Info("Resource alignment at pod scope guaranteed", "pod", klog.KObj(pod))
+	if IsAlignmentGuaranteed(s.policy) || s.policy.Name() == PolicyIndependentNUMA && s.hasCommonNUMAPlacement(logger, pod) {
+		logger.V(4).Info("Resources aligned at pod scope", "pod", klog.KObj(pod))
 		metrics.ContainerAlignedComputeResources.WithLabelValues(metrics.AlignScopePod, metrics.AlignedNUMANode).Inc()
 	}
+}
+
+// A resource-specific policy can succeed without common-node alignment. Count
+// only concrete singleton placement shared by both resources and every container.
+func (s *podScope) hasCommonNUMAPlacement(logger klog.Logger, pod *v1.Pod) bool {
+	var common sets.Set[int]
+	for _, container := range append(pod.Spec.InitContainers, pod.Spec.Containers...) {
+		cpuNodes, memoryNodes := sets.New[int](), sets.New[int]()
+		for _, provider := range s.hintProviders {
+			if cpu, ok := provider.(interface {
+				GetCPUNUMANodes(string, string) sets.Set[int]
+			}); ok {
+				cpuNodes.Insert(cpu.GetCPUNUMANodes(string(pod.UID), container.Name).UnsortedList()...)
+			}
+			if memory, ok := provider.(interface {
+				GetMemoryNUMANodes(klog.Logger, *v1.Pod, *v1.Container) sets.Set[int]
+			}); ok {
+				memoryNodes.Insert(memory.GetMemoryNUMANodes(logger, pod, &container).UnsortedList()...)
+			}
+		}
+		if cpuNodes.Len() != 1 || !cpuNodes.Equal(memoryNodes) {
+			return false
+		}
+		if common != nil && !common.Equal(cpuNodes) {
+			return false
+		}
+		common = cpuNodes
+	}
+	return common != nil
 }
 
 func (s *podScope) accumulateProvidersHints(logger klog.Logger, pod *v1.Pod, operation lifecycle.Operation) []map[string][]TopologyHint {

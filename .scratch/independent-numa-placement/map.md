@@ -1,6 +1,6 @@
 # Independent CPU and memory NUMA placement design
 
-Status: design and ticket breakdown approved on 2026-10-14; 11 tickets published. Ticket 01 is resolved; the remaining software/tooling tickets are not implemented.
+Status: design and ticket breakdown approved on 2026-10-14; 11 tickets published. Tickets 01 and 02 are resolved; the remaining software/tooling tickets are not implemented.
 
 Review: [specification](spec.md), [implementation plan](implementation-plan.md),
 and [validation plan](validation-plan.md).
@@ -16,6 +16,13 @@ single shared CPU/memory target and required single-numa-node alignment conflict
 with the new split-target use case and need an explicit design revision.
 
 ## Decisions-so-far
+
+- Ticket 02 resolved on 2026-10-14: `independent-numa` supports ordinary and
+  legacy combined-placement Pods on Linux with pod scope. Concrete allocation,
+  recovery, rollback, masks, and alignment metrics are covered. Focused checks
+  and both review axes pass; full-suite failures match earlier recorded names
+  and packages. See [verification-02.md](verification-02.md) and the
+  [ticket answer](issues/02-enable-independent-policy.md#answer).
 
 - Ticket 01 resolved on 2026-10-14: separate internal targets, optional memory
   affinity, and rollback/cleanup preparation preserve legacy behavior. Focused
@@ -110,7 +117,7 @@ No parent issue was closed or modified.
 | [10: Automate paired STREAM evaluation and evidence reporting](issues/10-automate-paired-stream-evaluation.md) | 08, 09 | ready-for-agent |
 | [11: Record user-operated VM or hardware acceptance evidence](issues/11-record-manual-runtime-evidence.md) | 10 | ready-for-agent |
 
-Current frontier after ticket 01: **02 and 08**.
+Current frontier after ticket 02: **03 and 08**.
 
 Initial frontier: **01 and 08**. A ready-for-agent status means the ticket is
 prepared, not that its dependencies are resolved. Claim only a ticket whose

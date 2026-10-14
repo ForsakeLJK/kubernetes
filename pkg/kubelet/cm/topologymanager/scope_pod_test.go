@@ -67,188 +67,208 @@ func (p *numaPlacementTestProvider) NUMAPlacementAllocated(_ *v1.Pod, container 
 func (p *numaPlacementTestProvider) HasRestoredNUMAPlacement(*v1.Pod) bool { return p.restored }
 
 func TestRequestedNUMAPlacementRepeatedRecovery(t *testing.T) {
-	logger, ctx := ktesting.NewTestContext(t)
-	node := int32(2)
-	restart := v1.ContainerRestartPolicyAlways
-	pod := &v1.Pod{Spec: v1.PodSpec{NUMANode: &node, InitContainers: []v1.Container{{Name: "init"}, {Name: "sidecar", RestartPolicy: &restart}}, Containers: []v1.Container{{Name: "app"}}}}
-	s := NewPodScope(NewSingleNumaNodePolicy(&NUMAInfo{Nodes: []int{0, 2}}, PolicyOptions{})).(*podScope)
-	staleHints := []TopologyHint{{NUMANodeAffinity: NewTestBitMask(0), Preferred: true}}
-	cpu := &numaPlacementTestProvider{mockHintProvider: mockHintProvider{th: map[string][]TopologyHint{"cpu": staleHints}}, assignments: map[string]bool{"init": true, "sidecar": true}, restored: true}
-	memory := &numaPlacementTestProvider{mockHintProvider: mockHintProvider{th: map[string][]TopologyHint{"memory": staleHints, "hugepages-2Mi": staleHints}}, assignments: map[string]bool{"init": true, "sidecar": true}, restored: true, failContainer: "app", allocateError: errors.New("injected recovery failure")}
-	s.AddHintProvider(logger, cpu)
-	s.AddHintProvider(logger, memory)
-	for attempt := 0; attempt < 2; attempt++ {
-		result := s.Admit(ctx, pod, lifecycle.AddOperation)
-		if result.Admit || !strings.Contains(result.Message, "injected recovery failure") {
-			t.Fatalf("recovery attempt %d = %+v", attempt, result)
-		}
-		if !reflect.DeepEqual(cpu.assignments, map[string]bool{"init": true, "sidecar": true}) || !reflect.DeepEqual(memory.assignments, map[string]bool{"init": true, "sidecar": true}) {
-			t.Fatalf("recovery attempt %d modified checkpoint assignments: cpu=%v memory=%v", attempt, cpu.assignments, memory.assignments)
-		}
-	}
-	memory.allocateError = nil
-	if result := s.Admit(ctx, pod, lifecycle.AddOperation); !result.Admit {
-		t.Fatalf("matching assignments could not be reused: %+v", result)
-	}
-	if !cpu.assignments["init"] || !cpu.assignments["sidecar"] || !cpu.assignments["app"] || !memory.assignments["init"] || !memory.assignments["sidecar"] || !memory.assignments["app"] {
-		t.Fatalf("recovery did not retain and complete assignments: cpu=%v memory=%v", cpu.assignments, memory.assignments)
+	for _, newPolicy := range []func(*NUMAInfo, PolicyOptions) Policy{NewSingleNumaNodePolicy, NewIndependentNUMAPolicy} {
+		t.Run(newPolicy(&NUMAInfo{}, PolicyOptions{}).Name(), func(t *testing.T) {
+			logger, ctx := ktesting.NewTestContext(t)
+			node := int32(2)
+			restart := v1.ContainerRestartPolicyAlways
+			pod := &v1.Pod{Spec: v1.PodSpec{NUMANode: &node, InitContainers: []v1.Container{{Name: "init"}, {Name: "sidecar", RestartPolicy: &restart}}, Containers: []v1.Container{{Name: "app"}}}}
+			s := NewPodScope(newPolicy(&NUMAInfo{Nodes: []int{0, 2}}, PolicyOptions{})).(*podScope)
+			staleHints := []TopologyHint{{NUMANodeAffinity: NewTestBitMask(0), Preferred: true}}
+			cpu := &numaPlacementTestProvider{mockHintProvider: mockHintProvider{th: map[string][]TopologyHint{"cpu": staleHints}}, assignments: map[string]bool{"init": true, "sidecar": true}, restored: true}
+			memory := &numaPlacementTestProvider{mockHintProvider: mockHintProvider{th: map[string][]TopologyHint{"memory": staleHints, "hugepages-2Mi": staleHints}}, assignments: map[string]bool{"init": true, "sidecar": true}, restored: true, failContainer: "app", allocateError: errors.New("injected recovery failure")}
+			s.AddHintProvider(logger, cpu)
+			s.AddHintProvider(logger, memory)
+			for attempt := 0; attempt < 2; attempt++ {
+				result := s.Admit(ctx, pod, lifecycle.AddOperation)
+				if result.Admit || !strings.Contains(result.Message, "injected recovery failure") {
+					t.Fatalf("recovery attempt %d = %+v", attempt, result)
+				}
+				if !reflect.DeepEqual(cpu.assignments, map[string]bool{"init": true, "sidecar": true}) || !reflect.DeepEqual(memory.assignments, map[string]bool{"init": true, "sidecar": true}) {
+					t.Fatalf("recovery attempt %d modified checkpoint assignments: cpu=%v memory=%v", attempt, cpu.assignments, memory.assignments)
+				}
+			}
+			memory.allocateError = nil
+			if result := s.Admit(ctx, pod, lifecycle.AddOperation); !result.Admit {
+				t.Fatalf("matching assignments could not be reused: %+v", result)
+			}
+			if !cpu.assignments["init"] || !cpu.assignments["sidecar"] || !cpu.assignments["app"] || !memory.assignments["init"] || !memory.assignments["sidecar"] || !memory.assignments["app"] {
+				t.Fatalf("recovery did not retain and complete assignments: cpu=%v memory=%v", cpu.assignments, memory.assignments)
+			}
+		})
 	}
 }
 
 func TestRequestedNUMAPlacementRollsBackWholePod(t *testing.T) {
-	logger, ctx := ktesting.NewTestContext(t)
-	info := &NUMAInfo{Nodes: []int{0, 2}, NUMADistances: NUMADistances{0: {10, 20}, 2: {20, 10}}}
-	node := int32(2)
-	pod := &v1.Pod{Spec: v1.PodSpec{NUMANode: &node, InitContainers: []v1.Container{{Name: "init"}}, Containers: []v1.Container{{Name: "app-a"}, {Name: "app-b"}}}}
-	hints := map[string][]TopologyHint{"cpu": {{NUMANodeAffinity: NewTestBitMask(2), Preferred: true}}}
-	for _, fail := range []string{"init", "app-a", "app-b"} {
-		t.Run(fail, func(t *testing.T) {
-			first := &numaPlacementTestProvider{mockHintProvider: mockHintProvider{th: hints}, assignments: map[string]bool{"init": true}}
-			second := &numaPlacementTestProvider{mockHintProvider: mockHintProvider{th: hints}, assignments: map[string]bool{}, failContainer: fail, allocateError: errors.New("injected allocation failure")}
-			s := NewPodScope(NewSingleNumaNodePolicy(info, PolicyOptions{})).(*podScope)
-			s.AddHintProvider(logger, first)
-			s.AddHintProvider(logger, second)
-			priorCPU := TopologyHint{NUMANodeAffinity: NewTestBitMask(2), Preferred: true}
-			priorMemory := TopologyHint{NUMANodeAffinity: NewTestBitMask(0), Preferred: true}
-			s.setTopologyHints(string(pod.UID), "init", priorCPU)
-			s.setMemoryTopologyHints(string(pod.UID), "init", priorMemory)
-			result := s.Admit(ctx, pod, lifecycle.AddOperation)
-			if result.Admit || !strings.Contains(result.Message, "injected allocation failure") {
-				t.Fatalf("admission = %+v, want injected failure", result)
-			}
-			if !reflect.DeepEqual(first.assignments, map[string]bool{"init": true}) || len(second.assignments) != 0 {
-				t.Fatalf("partial allocation retained: first=%v second=%v", first.assignments, second.assignments)
-			}
-			cpu := s.GetAffinity(logger, string(pod.UID), "init")
-			memory := s.GetMemoryAffinity(logger, string(pod.UID), "init")
-			if !cpu.IsEqual(priorCPU) || !memory.IsEqual(priorMemory) {
-				t.Fatal("failed admission did not preserve pre-existing affinities")
-			}
-			for _, name := range []string{"app-a", "app-b"} {
-				if s.GetAffinity(logger, string(pod.UID), name).NUMANodeAffinity != nil || s.GetMemoryAffinity(logger, string(pod.UID), name).NUMANodeAffinity != nil {
-					t.Fatalf("failed admission retained new affinities for %s", name)
-				}
+	for _, newPolicy := range []func(*NUMAInfo, PolicyOptions) Policy{NewSingleNumaNodePolicy, NewIndependentNUMAPolicy} {
+		t.Run(newPolicy(&NUMAInfo{}, PolicyOptions{}).Name(), func(t *testing.T) {
+			logger, ctx := ktesting.NewTestContext(t)
+			info := &NUMAInfo{Nodes: []int{0, 2}, NUMADistances: NUMADistances{0: {10, 20}, 2: {20, 10}}}
+			node := int32(2)
+			pod := &v1.Pod{Spec: v1.PodSpec{NUMANode: &node, InitContainers: []v1.Container{{Name: "init"}}, Containers: []v1.Container{{Name: "app-a"}, {Name: "app-b"}}}}
+			hints := map[string][]TopologyHint{"cpu": {{NUMANodeAffinity: NewTestBitMask(2), Preferred: true}}}
+			for _, fail := range []string{"init", "app-a", "app-b"} {
+				t.Run(fail, func(t *testing.T) {
+					first := &numaPlacementTestProvider{mockHintProvider: mockHintProvider{th: hints}, assignments: map[string]bool{"init": true}}
+					second := &numaPlacementTestProvider{mockHintProvider: mockHintProvider{th: hints}, assignments: map[string]bool{}, failContainer: fail, allocateError: errors.New("injected allocation failure")}
+					s := NewPodScope(newPolicy(info, PolicyOptions{})).(*podScope)
+					s.AddHintProvider(logger, first)
+					s.AddHintProvider(logger, second)
+					priorCPU := TopologyHint{NUMANodeAffinity: NewTestBitMask(2), Preferred: true}
+					priorMemory := TopologyHint{NUMANodeAffinity: NewTestBitMask(0), Preferred: true}
+					s.setTopologyHints(string(pod.UID), "init", priorCPU)
+					s.setMemoryTopologyHints(string(pod.UID), "init", priorMemory)
+					result := s.Admit(ctx, pod, lifecycle.AddOperation)
+					if result.Admit || !strings.Contains(result.Message, "injected allocation failure") {
+						t.Fatalf("admission = %+v, want injected failure", result)
+					}
+					if !reflect.DeepEqual(first.assignments, map[string]bool{"init": true}) || len(second.assignments) != 0 {
+						t.Fatalf("partial allocation retained: first=%v second=%v", first.assignments, second.assignments)
+					}
+					cpu := s.GetAffinity(logger, string(pod.UID), "init")
+					memory := s.GetMemoryAffinity(logger, string(pod.UID), "init")
+					if !cpu.IsEqual(priorCPU) || !memory.IsEqual(priorMemory) {
+						t.Fatal("failed admission did not preserve pre-existing affinities")
+					}
+					for _, name := range []string{"app-a", "app-b"} {
+						if s.GetAffinity(logger, string(pod.UID), name).NUMANodeAffinity != nil || s.GetMemoryAffinity(logger, string(pod.UID), name).NUMANodeAffinity != nil {
+							t.Fatalf("failed admission retained new affinities for %s", name)
+						}
+					}
+				})
 			}
 		})
 	}
 }
 
 func TestRequestedNUMAPlacement(t *testing.T) {
-	logger, ctx := ktesting.NewTestContext(t)
-	info := &NUMAInfo{Nodes: []int{0, 2}, NUMADistances: NUMADistances{0: {10, 20}, 2: {20, 10}}}
-	node := int32(2)
-	newPod := func() *v1.Pod {
-		return &v1.Pod{Spec: v1.PodSpec{NUMANode: &node, Containers: []v1.Container{{Name: "app"}}}}
-	}
-	for _, tc := range []struct {
-		name   string
-		cpu    []TopologyHint
-		memory []TopologyHint
-		device []TopologyHint
-		fail   string
-	}{
-		{name: "requested node beats other preferred node", cpu: []TopologyHint{{NUMANodeAffinity: NewTestBitMask(0), Preferred: true}, {NUMANodeAffinity: NewTestBitMask(2), Preferred: false}}, memory: []TopologyHint{{NUMANodeAffinity: NewTestBitMask(0), Preferred: true}, {NUMANodeAffinity: NewTestBitMask(2), Preferred: false}}},
-		{name: "CPU capacity elsewhere", cpu: []TopologyHint{{NUMANodeAffinity: NewTestBitMask(0), Preferred: true}}, memory: []TopologyHint{{NUMANodeAffinity: NewTestBitMask(2), Preferred: true}}, fail: "cpu"},
-		{name: "memory capacity elsewhere", cpu: []TopologyHint{{NUMANodeAffinity: NewTestBitMask(2), Preferred: true}}, memory: []TopologyHint{{NUMANodeAffinity: NewTestBitMask(0), Preferred: true}}, fail: "memory"},
-		{name: "device conflict", cpu: []TopologyHint{{NUMANodeAffinity: NewTestBitMask(2), Preferred: true}}, memory: []TopologyHint{{NUMANodeAffinity: NewTestBitMask(2), Preferred: true}}, device: []TopologyHint{{NUMANodeAffinity: NewTestBitMask(0), Preferred: true}}, fail: "device"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			s := NewPodScope(NewSingleNumaNodePolicy(info, PolicyOptions{})).(*podScope)
-			s.AddHintProvider(logger, &numaPlacementTestProvider{mockHintProvider: mockHintProvider{th: map[string][]TopologyHint{"cpu": tc.cpu}}})
-			s.AddHintProvider(logger, &numaPlacementTestProvider{mockHintProvider: mockHintProvider{th: map[string][]TopologyHint{"memory": tc.memory}}})
-			if tc.device != nil {
-				s.AddHintProvider(logger, &numaPlacementTestProvider{mockHintProvider: mockHintProvider{th: map[string][]TopologyHint{"device": tc.device}}})
+	for _, newPolicy := range []func(*NUMAInfo, PolicyOptions) Policy{NewSingleNumaNodePolicy, NewIndependentNUMAPolicy} {
+		t.Run(newPolicy(&NUMAInfo{}, PolicyOptions{}).Name(), func(t *testing.T) {
+			logger, ctx := ktesting.NewTestContext(t)
+			info := &NUMAInfo{Nodes: []int{0, 2}, NUMADistances: NUMADistances{0: {10, 20}, 2: {20, 10}}}
+			node := int32(2)
+			newPod := func() *v1.Pod {
+				return &v1.Pod{Spec: v1.PodSpec{NUMANode: &node, Containers: []v1.Container{{Name: "app"}}}}
 			}
-			pod := newPod()
-			result := s.Admit(ctx, pod, lifecycle.AddOperation)
-			if tc.fail != "" {
-				wantReason := "NUMAPlacementFailed"
-				if tc.fail == "device" {
-					wantReason = ErrorTopologyAffinity
-				}
-				if result.Admit || result.Reason != wantReason || !strings.Contains(strings.ToLower(result.Message), tc.fail) || !strings.Contains(result.Message, "NUMA node 2") {
-					t.Fatalf("admission = %+v, want %s failure", result, tc.fail)
-				}
-				return
+			for _, tc := range []struct {
+				name   string
+				cpu    []TopologyHint
+				memory []TopologyHint
+				device []TopologyHint
+				fail   string
+			}{
+				{name: "requested node beats other preferred node", cpu: []TopologyHint{{NUMANodeAffinity: NewTestBitMask(0), Preferred: true}, {NUMANodeAffinity: NewTestBitMask(2), Preferred: false}}, memory: []TopologyHint{{NUMANodeAffinity: NewTestBitMask(0), Preferred: true}, {NUMANodeAffinity: NewTestBitMask(2), Preferred: false}}},
+				{name: "CPU capacity elsewhere", cpu: []TopologyHint{{NUMANodeAffinity: NewTestBitMask(0), Preferred: true}}, memory: []TopologyHint{{NUMANodeAffinity: NewTestBitMask(2), Preferred: true}}, fail: "cpu"},
+				{name: "memory capacity elsewhere", cpu: []TopologyHint{{NUMANodeAffinity: NewTestBitMask(2), Preferred: true}}, memory: []TopologyHint{{NUMANodeAffinity: NewTestBitMask(0), Preferred: true}}, fail: "memory"},
+				{name: "device conflict", cpu: []TopologyHint{{NUMANodeAffinity: NewTestBitMask(2), Preferred: true}}, memory: []TopologyHint{{NUMANodeAffinity: NewTestBitMask(2), Preferred: true}}, device: []TopologyHint{{NUMANodeAffinity: NewTestBitMask(0), Preferred: true}}, fail: "device"},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					s := NewPodScope(newPolicy(info, PolicyOptions{})).(*podScope)
+					s.AddHintProvider(logger, &numaPlacementTestProvider{mockHintProvider: mockHintProvider{th: map[string][]TopologyHint{"cpu": tc.cpu}}})
+					s.AddHintProvider(logger, &numaPlacementTestProvider{mockHintProvider: mockHintProvider{th: map[string][]TopologyHint{"memory": tc.memory}}})
+					if tc.device != nil {
+						s.AddHintProvider(logger, &numaPlacementTestProvider{mockHintProvider: mockHintProvider{th: map[string][]TopologyHint{"device": tc.device}}})
+					}
+					pod := newPod()
+					result := s.Admit(ctx, pod, lifecycle.AddOperation)
+					if tc.fail != "" {
+						wantReason := "NUMAPlacementFailed"
+						if tc.fail == "device" {
+							wantReason = ErrorTopologyAffinity
+						}
+						if result.Admit || result.Reason != wantReason || !strings.Contains(strings.ToLower(result.Message), tc.fail) || !strings.Contains(result.Message, "NUMA node 2") {
+							t.Fatalf("admission = %+v, want %s failure", result, tc.fail)
+						}
+						return
+					}
+					if !result.Admit || !s.GetAffinity(logger, string(pod.UID), "app").NUMANodeAffinity.IsEqual(NewTestBitMask(2)) {
+						t.Fatalf("requested node was not selected: %+v", result)
+					}
+				})
 			}
-			if !result.Admit || !s.GetAffinity(logger, string(pod.UID), "app").NUMANodeAffinity.IsEqual(NewTestBitMask(2)) {
-				t.Fatalf("requested node was not selected: %+v", result)
+			omitted := newPod()
+			omitted.Spec.NUMANode = nil
+			omittedScope := NewPodScope(newPolicy(info, PolicyOptions{})).(*podScope)
+			omittedHints := []TopologyHint{{NUMANodeAffinity: NewTestBitMask(0), Preferred: true}, {NUMANodeAffinity: NewTestBitMask(2), Preferred: false}}
+			omittedScope.AddHintProvider(logger, &numaPlacementTestProvider{mockHintProvider: mockHintProvider{th: map[string][]TopologyHint{"cpu": omittedHints}}})
+			omittedScope.AddHintProvider(logger, &numaPlacementTestProvider{mockHintProvider: mockHintProvider{th: map[string][]TopologyHint{"memory": omittedHints}}})
+			if result := omittedScope.Admit(ctx, omitted, lifecycle.AddOperation); !result.Admit || !omittedScope.GetAffinity(logger, string(omitted.UID), "app").NUMANodeAffinity.IsEqual(NewTestBitMask(0)) {
+				t.Fatalf("omitted-field topology selection changed: %+v", result)
+			}
+			first := &numaPlacementTestProvider{mockHintProvider: mockHintProvider{th: map[string][]TopologyHint{"cpu": {{NUMANodeAffinity: NewTestBitMask(2), Preferred: true}}}}}
+			second := &numaPlacementTestProvider{
+				mockHintProvider: mockHintProvider{th: map[string][]TopologyHint{"memory": {{NUMANodeAffinity: NewTestBitMask(2), Preferred: true}}}},
+				allocateError:    errors.New("injected memory failure"),
+			}
+			s := NewPodScope(newPolicy(info, PolicyOptions{})).(*podScope)
+			s.AddHintProvider(logger, first)
+			s.AddHintProvider(logger, second)
+			result := s.Admit(ctx, newPod(), lifecycle.AddOperation)
+			if result.Admit || !first.released || first.allocated || !strings.Contains(result.Message, "injected memory failure") {
+				t.Fatalf("partial allocation was not released: %+v, first=%+v", result, first)
+			}
+			first.allocated, first.released = true, false
+			result = s.Admit(ctx, newPod(), lifecycle.AddOperation)
+			if result.Admit || first.released || !first.allocated {
+				t.Fatalf("retry removed an existing assignment: %+v, first=%+v", result, first)
 			}
 		})
-	}
-	omitted := newPod()
-	omitted.Spec.NUMANode = nil
-	omittedScope := NewPodScope(NewSingleNumaNodePolicy(info, PolicyOptions{})).(*podScope)
-	omittedHints := []TopologyHint{{NUMANodeAffinity: NewTestBitMask(0), Preferred: true}, {NUMANodeAffinity: NewTestBitMask(2), Preferred: false}}
-	omittedScope.AddHintProvider(logger, &numaPlacementTestProvider{mockHintProvider: mockHintProvider{th: map[string][]TopologyHint{"cpu": omittedHints}}})
-	omittedScope.AddHintProvider(logger, &numaPlacementTestProvider{mockHintProvider: mockHintProvider{th: map[string][]TopologyHint{"memory": omittedHints}}})
-	if result := omittedScope.Admit(ctx, omitted, lifecycle.AddOperation); !result.Admit || !omittedScope.GetAffinity(logger, string(omitted.UID), "app").NUMANodeAffinity.IsEqual(NewTestBitMask(0)) {
-		t.Fatalf("omitted-field topology selection changed: %+v", result)
-	}
-	first := &numaPlacementTestProvider{mockHintProvider: mockHintProvider{th: map[string][]TopologyHint{"cpu": {{NUMANodeAffinity: NewTestBitMask(2), Preferred: true}}}}}
-	second := &numaPlacementTestProvider{
-		mockHintProvider: mockHintProvider{th: map[string][]TopologyHint{"memory": {{NUMANodeAffinity: NewTestBitMask(2), Preferred: true}}}},
-		allocateError:    errors.New("injected memory failure"),
-	}
-	s := NewPodScope(NewSingleNumaNodePolicy(info, PolicyOptions{})).(*podScope)
-	s.AddHintProvider(logger, first)
-	s.AddHintProvider(logger, second)
-	result := s.Admit(ctx, newPod(), lifecycle.AddOperation)
-	if result.Admit || !first.released || first.allocated || !strings.Contains(result.Message, "injected memory failure") {
-		t.Fatalf("partial allocation was not released: %+v, first=%+v", result, first)
-	}
-	first.allocated, first.released = true, false
-	result = s.Admit(ctx, newPod(), lifecycle.AddOperation)
-	if result.Admit || first.released || !first.allocated {
-		t.Fatalf("retry removed an existing assignment: %+v, first=%+v", result, first)
 	}
 }
 
 func TestRequestedNUMAZeroPlacement(t *testing.T) {
-	logger, ctx := ktesting.NewTestContext(t)
-	zero := int32(0)
-	pod := &v1.Pod{Spec: v1.PodSpec{NUMANode: &zero, Containers: []v1.Container{{Name: "app"}}}}
-	s := NewPodScope(NewSingleNumaNodePolicy(&NUMAInfo{Nodes: []int{0, 2}}, PolicyOptions{}))
-	hints := []TopologyHint{{NUMANodeAffinity: NewTestBitMask(2), Preferred: true}, {NUMANodeAffinity: NewTestBitMask(0), Preferred: false}}
-	s.AddHintProvider(logger, &numaPlacementTestProvider{mockHintProvider: mockHintProvider{th: map[string][]TopologyHint{"cpu": hints, "memory": hints}}})
-	if result := s.Admit(ctx, pod, lifecycle.AddOperation); !result.Admit {
-		t.Fatalf("explicit node zero was refused: %+v", result)
-	}
-	cpu := s.GetAffinity(logger, string(pod.UID), "app")
-	memory := GetMemoryAffinity(s, logger, string(pod.UID), "app")
-	if !cpu.NUMANodeAffinity.IsEqual(NewTestBitMask(0)) || !memory.NUMANodeAffinity.IsEqual(NewTestBitMask(0)) {
-		t.Fatalf("explicit zero followed ordinary Pod preferences: CPU=%v memory=%v", cpu, memory)
+	for _, newPolicy := range []func(*NUMAInfo, PolicyOptions) Policy{NewSingleNumaNodePolicy, NewIndependentNUMAPolicy} {
+		t.Run(newPolicy(&NUMAInfo{}, PolicyOptions{}).Name(), func(t *testing.T) {
+			logger, ctx := ktesting.NewTestContext(t)
+			zero := int32(0)
+			pod := &v1.Pod{Spec: v1.PodSpec{NUMANode: &zero, Containers: []v1.Container{{Name: "app"}}}}
+			s := NewPodScope(newPolicy(&NUMAInfo{Nodes: []int{0, 2}}, PolicyOptions{}))
+			hints := []TopologyHint{{NUMANodeAffinity: NewTestBitMask(2), Preferred: true}, {NUMANodeAffinity: NewTestBitMask(0), Preferred: false}}
+			s.AddHintProvider(logger, &numaPlacementTestProvider{mockHintProvider: mockHintProvider{th: map[string][]TopologyHint{"cpu": hints, "memory": hints}}})
+			if result := s.Admit(ctx, pod, lifecycle.AddOperation); !result.Admit {
+				t.Fatalf("explicit node zero was refused: %+v", result)
+			}
+			cpu := s.GetAffinity(logger, string(pod.UID), "app")
+			memory := GetMemoryAffinity(s, logger, string(pod.UID), "app")
+			if !cpu.NUMANodeAffinity.IsEqual(NewTestBitMask(0)) || !memory.NUMANodeAffinity.IsEqual(NewTestBitMask(0)) {
+				t.Fatalf("explicit zero followed ordinary Pod preferences: CPU=%v memory=%v", cpu, memory)
+			}
+		})
 	}
 }
 
 func TestRequestedNUMAHugepageHints(t *testing.T) {
-	logger, ctx := ktesting.NewTestContext(t)
-	info := &NUMAInfo{Nodes: []int{0, 2}, NUMADistances: NUMADistances{0: {10, 20}, 2: {20, 10}}}
-	node := int32(2)
-	pageName := "hugepages-2Mi"
-	for _, tc := range []struct {
-		name  string
-		hints []TopologyHint
-		fail  bool
-	}{
-		{name: "local hugepages available", hints: []TopologyHint{{NUMANodeAffinity: NewTestBitMask(0), Preferred: true}, {NUMANodeAffinity: NewTestBitMask(2), Preferred: false}}},
-		{name: "hugepages only elsewhere", hints: []TopologyHint{{NUMANodeAffinity: NewTestBitMask(0), Preferred: true}}, fail: true},
-		{name: "hugepages exhausted", hints: []TopologyHint{}, fail: true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			pod := &v1.Pod{Spec: v1.PodSpec{NUMANode: &node, Containers: []v1.Container{{Name: "app"}}}}
-			s := NewPodScope(NewSingleNumaNodePolicy(info, PolicyOptions{})).(*podScope)
-			s.AddHintProvider(logger, &numaPlacementTestProvider{mockHintProvider: mockHintProvider{th: map[string][]TopologyHint{"cpu": {{NUMANodeAffinity: NewTestBitMask(2), Preferred: true}}}}})
-			s.AddHintProvider(logger, &numaPlacementTestProvider{mockHintProvider: mockHintProvider{th: map[string][]TopologyHint{"memory": {{NUMANodeAffinity: NewTestBitMask(2), Preferred: true}}, pageName: tc.hints}}})
-			result := s.Admit(ctx, pod, lifecycle.AddOperation)
-			if tc.fail {
-				if result.Admit || result.Reason != "NUMAPlacementFailed" || !strings.Contains(result.Message, pageName) || !strings.Contains(result.Message, "NUMA node 2") {
-					t.Fatalf("admission = %+v, want local %s shortage", result, pageName)
-				}
-				return
-			}
-			if !result.Admit || !s.GetAffinity(logger, string(pod.UID), "app").NUMANodeAffinity.IsEqual(NewTestBitMask(2)) {
-				t.Fatalf("hugepage hint changed requested affinity: %+v", result)
+	for _, newPolicy := range []func(*NUMAInfo, PolicyOptions) Policy{NewSingleNumaNodePolicy, NewIndependentNUMAPolicy} {
+		t.Run(newPolicy(&NUMAInfo{}, PolicyOptions{}).Name(), func(t *testing.T) {
+			logger, ctx := ktesting.NewTestContext(t)
+			info := &NUMAInfo{Nodes: []int{0, 2}, NUMADistances: NUMADistances{0: {10, 20}, 2: {20, 10}}}
+			node := int32(2)
+			pageName := "hugepages-2Mi"
+			for _, tc := range []struct {
+				name  string
+				hints []TopologyHint
+				fail  bool
+			}{
+				{name: "local hugepages available", hints: []TopologyHint{{NUMANodeAffinity: NewTestBitMask(0), Preferred: true}, {NUMANodeAffinity: NewTestBitMask(2), Preferred: false}}},
+				{name: "hugepages only elsewhere", hints: []TopologyHint{{NUMANodeAffinity: NewTestBitMask(0), Preferred: true}}, fail: true},
+				{name: "hugepages exhausted", hints: []TopologyHint{}, fail: true},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					pod := &v1.Pod{Spec: v1.PodSpec{NUMANode: &node, Containers: []v1.Container{{Name: "app"}}}}
+					s := NewPodScope(newPolicy(info, PolicyOptions{})).(*podScope)
+					s.AddHintProvider(logger, &numaPlacementTestProvider{mockHintProvider: mockHintProvider{th: map[string][]TopologyHint{"cpu": {{NUMANodeAffinity: NewTestBitMask(2), Preferred: true}}}}})
+					s.AddHintProvider(logger, &numaPlacementTestProvider{mockHintProvider: mockHintProvider{th: map[string][]TopologyHint{"memory": {{NUMANodeAffinity: NewTestBitMask(2), Preferred: true}}, pageName: tc.hints}}})
+					result := s.Admit(ctx, pod, lifecycle.AddOperation)
+					if tc.fail {
+						if result.Admit || result.Reason != "NUMAPlacementFailed" || !strings.Contains(result.Message, pageName) || !strings.Contains(result.Message, "NUMA node 2") {
+							t.Fatalf("admission = %+v, want local %s shortage", result, pageName)
+						}
+						return
+					}
+					if !result.Admit || !s.GetAffinity(logger, string(pod.UID), "app").NUMANodeAffinity.IsEqual(NewTestBitMask(2)) {
+						t.Fatalf("hugepage hint changed requested affinity: %+v", result)
+					}
+				})
 			}
 		})
 	}

@@ -271,13 +271,36 @@ Participating Pods require this setup:
 | Operating system | Linux |
 | CPU Manager | `static` |
 | Memory Manager | `Static` |
-| Topology Manager | `single-numa-node`, scope `pod` |
+| Topology Manager | `single-numa-node` or `independent-numa`, scope `pod` |
 | Container resources | Equal CPU/memory requests and limits; positive whole-number CPU requests |
 | Pod QoS | Guaranteed |
 
 Every application container, init container, and sidecar needs those resource declarations. Pod-level resource budgets are excluded. The NUMA ID is immutable, CPU/memory resize is rejected, and ephemeral-container additions are rejected. Changing placement or resource requirements requires a replacement Pod. There is no new feature gate.
 
 Placement has two observable parts: the container's allowed CPUs all belong to the selected NUMA node, and its allowed memory-node mask contains exactly that node. Memory Manager also accounts for ordinary memory and requested hugepage sizes there. Shared or previously allocated pages can have different physical locality; this feature does not migrate them or promise that every page a process can access lives on the selected node.
+
+### The independent-numa policy
+
+Operators can select `topologyManagerPolicy: independent-numa` with
+`topologyManagerScope: pod` on Linux. Both settings must be explicit: the global
+defaults remain `none` and `container`. The new policy rejects container scope
+and the CPU Manager option `align-by-socket`. Existing topology node-count limits
+and supported policy options still apply.
+
+The current policy supports ordinary Pods and the legacy combined placement
+requirement `spec.numaNode`. Ordinary Pods use the existing `single-numa-node`
+hint-merging behavior, including their existing eligibility rules. Legacy Pods
+require both static managers and the resource declarations above, and retain
+the same exact CPU/memory target, refusal, rollback, and recovery guarantees
+under either policy. For example, `numaNode: 2` always requires both resources
+on node 2 under `independent-numa`.
+
+Independent placement means selecting separate singleton targets for CPUs and
+memory. The policy name prepares that extension; the `cpuNUMA` and `memNUMA` API
+fields and split placement are scheduled for subsequent tickets. Current
+common-node outcomes are counted as aligned only when the allocated CPU and
+memory masks identify the same single node. The new policy does not
+globally promise common-node alignment.
 
 ## How the kubelet enforces it
 

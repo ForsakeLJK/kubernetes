@@ -305,7 +305,18 @@ positive whole CPUs are required. A shortage on a target refuses admission
 even if another node has capacity. Allocation failures roll back new resources;
 restarts reuse matching assignments and refuse conflicting checkpoints.
 
-Partial requests, multiple application containers, init/sidecar containers,
+Setting `memNUMA` alone selects one feasible CPU node automatically, including
+when the memory node has no CPUs. Selection preserves a valid restored CPU
+target, then prefers a feasible common node, then the closest feasible directed
+CPU-to-memory distance. Equal known distances select the lowest CPU node ID.
+Multiple nonlocal candidates require usable distance data; specify both targets
+or correct topology data if ranking fails. Restored, common, and sole feasible
+candidates need no distance comparison. The automatic CPU target remains
+mandatory through allocation, runtime configuration, and recovery; CPUs cannot
+span nodes to satisfy the request. The `prefer-closest-numa-nodes` option is not
+required for this selection.
+
+CPU-only requests, multiple application containers, init/sidecar containers,
 and hugepages are refused with unsupported-slice diagnostics pending their
 follow-up tickets. Pod budgets, resize, and ephemeral containers are excluded.
 Ordinary and legacy Pods retain their existing behavior.

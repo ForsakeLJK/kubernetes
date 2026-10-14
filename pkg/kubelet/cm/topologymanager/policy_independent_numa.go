@@ -21,12 +21,13 @@ const PolicyIndependentNUMA = "independent-numa"
 
 type independentNUMAPolicy struct {
 	Policy
+	numaInfo *NUMAInfo
 }
 
 // NewIndependentNUMAPolicy retains single-node merging for ordinary and legacy
 // Pods. Independent resource planning belongs outside the shared Merge contract.
 func NewIndependentNUMAPolicy(numaInfo *NUMAInfo, opts PolicyOptions) Policy {
-	return &independentNUMAPolicy{Policy: NewSingleNumaNodePolicy(numaInfo, opts)}
+	return &independentNUMAPolicy{Policy: NewSingleNumaNodePolicy(numaInfo, opts), numaInfo: numaInfo}
 }
 
 func (p *independentNUMAPolicy) Name() string {

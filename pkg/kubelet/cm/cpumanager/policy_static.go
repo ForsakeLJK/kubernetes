@@ -882,6 +882,13 @@ func (p *staticPolicy) Allocate(logger klog.Logger, s state.State, pod *v1.Pod, 
 
 func (p *staticPolicy) allocateForAdd(logger klog.Logger, s state.State, pod *v1.Pod, container *v1.Container) (rerr error) {
 	placement := topologymanager.ResolveNUMAPlacement(pod)
+	if placement.Required && placement.CPU == -1 {
+		hint := p.affinity.GetAffinity(logger, string(pod.UID), container.Name)
+		if hint.NUMANodeAffinity == nil || hint.NUMANodeAffinity.Count() != 1 {
+			return fmt.Errorf("automatic CPU placement requires a resolved singleton NUMA affinity")
+		}
+		placement.CPU = hint.NUMANodeAffinity.GetBits()[0]
+	}
 	numCPUs := p.guaranteedCPUs(logger, pod, container)
 	if numCPUs == 0 {
 		// container belongs in the shared pool (nothing to do; use default cpuset)

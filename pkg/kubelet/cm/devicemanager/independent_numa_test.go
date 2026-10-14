@@ -53,90 +53,102 @@ func (independentNUMAFailure) Allocate(context.Context, *v1.Pod, *v1.Container, 
 }
 
 func TestIndependentNUMADeviceAllocation(t *testing.T) {
-	for _, tc := range []struct {
-		name                        string
-		devices                     checkpoint.DevicesPerNUMA
-		topology                    bool
-		pluginFailure, finalFailure bool
-		want                        string
-	}{
-		{name: "CPU anchored device", topology: true, devices: checkpoint.DevicesPerNUMA{2: {"dev1", "dev2"}}},
-		{name: "topology unaware device", devices: checkpoint.DevicesPerNUMA{2: {"dev1", "dev2"}}},
-		{name: "device on memory target conflicts", topology: true, devices: checkpoint.DevicesPerNUMA{3: {"dev1", "dev2"}}, want: "Topology"},
-		{name: "nonpreferred CPU hint", topology: true, devices: checkpoint.DevicesPerNUMA{0: {"dev1"}, 2: {"dev2"}}, want: "Topology"},
-		{name: "plugin fails after CPU and memory", topology: true, devices: checkpoint.DevicesPerNUMA{2: {"dev1", "dev2"}}, pluginFailure: true, want: "plugin allocation failure"},
-		{name: "failure after all three managers", topology: true, devices: checkpoint.DevicesPerNUMA{2: {"dev1", "dev2"}}, finalFailure: true, want: "final allocation failure"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			logger, ctx := ktesting.NewTestContext(t)
-			const gib = uint64(1024 * 1024 * 1024)
-			info := &cadvisorapi.MachineInfo{NumCores: 5, Topology: []cadvisorapi.Node{
-				{Id: 0, Memory: 8 * gib, Cores: []cadvisorapi.Core{{Id: 0, SocketID: 0, Threads: []int{0}}}},
-				{Id: 2, Memory: 8 * gib, Cores: []cadvisorapi.Core{{Id: 1, SocketID: 1, Threads: []int{1}}, {Id: 2, SocketID: 1, Threads: []int{2}}, {Id: 3, SocketID: 1, Threads: []int{3}}, {Id: 4, SocketID: 1, Threads: []int{4}}}},
-				{Id: 3, Memory: 8 * gib},
-			}}
-			scope := topologymanager.NewPodScope(topologymanager.NewIndependentNUMAPolicy(&topologymanager.NUMAInfo{Nodes: []int{0, 2, 3}}, topologymanager.PolicyOptions{}))
-			directory := t.TempDir()
-			reservation := v1.ResourceList{v1.ResourceCPU: resource.MustParse("1"), v1.ResourceMemory: resource.MustParse("1Gi")}
-			cpu, err := cpumanager.NewManager(logger, "static", nil, time.Hour, info, cpuset.New(0), reservation, directory, scope)
-			if err != nil {
-				t.Fatal(err)
+	for _, automatic := range []bool{false, true} {
+		for _, tc := range []struct {
+			name                        string
+			devices                     checkpoint.DevicesPerNUMA
+			topology                    bool
+			pluginFailure, finalFailure bool
+			want                        string
+		}{
+			{name: "CPU anchored device", topology: true, devices: checkpoint.DevicesPerNUMA{2: {"dev1", "dev2"}}},
+			{name: "topology unaware device", devices: checkpoint.DevicesPerNUMA{2: {"dev1", "dev2"}}},
+			{name: "device on memory target conflicts", topology: true, devices: checkpoint.DevicesPerNUMA{3: {"dev1", "dev2"}}, want: "Topology"},
+			{name: "nonpreferred CPU hint", topology: true, devices: checkpoint.DevicesPerNUMA{0: {"dev1"}, 2: {"dev2"}}, want: "Topology"},
+			{name: "plugin fails after CPU and memory", topology: true, devices: checkpoint.DevicesPerNUMA{2: {"dev1", "dev2"}}, pluginFailure: true, want: "plugin allocation failure"},
+			{name: "failure after all three managers", topology: true, devices: checkpoint.DevicesPerNUMA{2: {"dev1", "dev2"}}, finalFailure: true, want: "final allocation failure"},
+		} {
+			name := tc.name
+			if automatic {
+				name += " automatic CPU"
+				if tc.want == "Topology" {
+					tc.want = "no feasible singleton CPU"
+				}
 			}
-			memory, err := memorymanager.NewManager(logger, "Static", info, reservation, []kubeletconfig.MemoryReservation{{NumaNode: 0, Limits: v1.ResourceList{v1.ResourceMemory: resource.MustParse("1Gi")}}}, directory, scope)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := cpu.Start(ctx, func() []*v1.Pod { return nil }, independentNUMASourcesNotReady{}, nil, nil, containermap.NewContainerMap()); err != nil {
-				t.Fatal(err)
-			}
-			if err := memory.Start(ctx, func() []*v1.Pod { return nil }, independentNUMASourcesNotReady{}, nil, nil, containermap.NewContainerMap()); err != nil {
-				t.Fatal(err)
-			}
-			device, err := getTestManager(logger, t.TempDir(), func() []*v1.Pod { return nil }, []TestResource{{resourceName: "domain1.com/resource1", devs: tc.devices, topology: tc.topology}})
-			if err != nil {
-				t.Fatal(err)
-			}
-			device.topologyAffinityStore, device.numaNodes = scope, []int{0, 2, 3}
-			if tc.pluginFailure {
-				device.endpoints["domain1.com/resource1"] = endpointInfo{e: &MockEndpoint{allocateFunc: func([]string) (*pluginapi.AllocateResponse, error) {
-					return nil, errors.New("injected plugin allocation failure")
-				}}}
-			}
-			scope.AddHintProvider(logger, cpu)
-			scope.AddHintProvider(logger, memory)
-			scope.AddHintProvider(logger, device)
-			resources := v1.ResourceList{v1.ResourceCPU: resource.MustParse("1"), v1.ResourceMemory: resource.MustParse("1Gi"), "domain1.com/resource1": resource.MustParse("2")}
-			pod := &v1.Pod{ObjectMeta: metav1.ObjectMeta{UID: "independent-device"}, Spec: v1.PodSpec{CPUNUMA: ptr.To[int32](2), MemNUMA: ptr.To[int32](3), Containers: []v1.Container{{Name: "app", Resources: v1.ResourceRequirements{Requests: resources, Limits: resources}}}}}
-			control := pod.DeepCopy()
-			control.UID = "unrelated-pod"
-			delete(control.Spec.Containers[0].Resources.Requests, "domain1.com/resource1")
-			delete(control.Spec.Containers[0].Resources.Limits, "domain1.com/resource1")
-			if result := scope.Admit(ctx, control, lifecycle.AddOperation); !result.Admit {
-				t.Fatalf("control admission = %+v", result)
-			}
-			if tc.finalFailure {
-				scope.AddHintProvider(logger, independentNUMAFailure{HintProvider: memory})
-			}
-			beforeCPU, beforeMemory := cpu.State().GetDefaultCPUSet(), memory.State().GetMachineState()
-			beforeCPUAssignments, beforeMemoryAssignments := cpu.State().GetCPUAssignments(), memory.State().GetMemoryAssignments()
-			for attempt := 0; attempt < 3; attempt++ {
-				result := scope.Admit(ctx, pod, lifecycle.AddOperation)
-				if tc.want != "" {
-					if result.Admit || !strings.Contains(result.Message, tc.want) {
-						t.Fatalf("admission = %+v, want %s", result, tc.want)
+			t.Run(name, func(t *testing.T) {
+				logger, ctx := ktesting.NewTestContext(t)
+				const gib = uint64(1024 * 1024 * 1024)
+				info := &cadvisorapi.MachineInfo{NumCores: 5, Topology: []cadvisorapi.Node{
+					{Id: 0, Memory: 8 * gib, Cores: []cadvisorapi.Core{{Id: 0, SocketID: 0, Threads: []int{0}}}},
+					{Id: 2, Memory: 8 * gib, Cores: []cadvisorapi.Core{{Id: 1, SocketID: 1, Threads: []int{1}}, {Id: 2, SocketID: 1, Threads: []int{2}}, {Id: 3, SocketID: 1, Threads: []int{3}}, {Id: 4, SocketID: 1, Threads: []int{4}}}},
+					{Id: 3, Memory: 8 * gib},
+				}}
+				scope := topologymanager.NewPodScope(topologymanager.NewIndependentNUMAPolicy(&topologymanager.NUMAInfo{Nodes: []int{0, 2, 3}}, topologymanager.PolicyOptions{}))
+				directory := t.TempDir()
+				reservation := v1.ResourceList{v1.ResourceCPU: resource.MustParse("1"), v1.ResourceMemory: resource.MustParse("1Gi")}
+				cpu, err := cpumanager.NewManager(logger, "static", nil, time.Hour, info, cpuset.New(0), reservation, directory, scope)
+				if err != nil {
+					t.Fatal(err)
+				}
+				memory, err := memorymanager.NewManager(logger, "Static", info, reservation, []kubeletconfig.MemoryReservation{{NumaNode: 0, Limits: v1.ResourceList{v1.ResourceMemory: resource.MustParse("1Gi")}}}, directory, scope)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := cpu.Start(ctx, func() []*v1.Pod { return nil }, independentNUMASourcesNotReady{}, nil, nil, containermap.NewContainerMap()); err != nil {
+					t.Fatal(err)
+				}
+				if err := memory.Start(ctx, func() []*v1.Pod { return nil }, independentNUMASourcesNotReady{}, nil, nil, containermap.NewContainerMap()); err != nil {
+					t.Fatal(err)
+				}
+				device, err := getTestManager(logger, t.TempDir(), func() []*v1.Pod { return nil }, []TestResource{{resourceName: "domain1.com/resource1", devs: tc.devices, topology: tc.topology}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				device.topologyAffinityStore, device.numaNodes = scope, []int{0, 2, 3}
+				if tc.pluginFailure {
+					device.endpoints["domain1.com/resource1"] = endpointInfo{e: &MockEndpoint{allocateFunc: func([]string) (*pluginapi.AllocateResponse, error) {
+						return nil, errors.New("injected plugin allocation failure")
+					}}}
+				}
+				scope.AddHintProvider(logger, cpu)
+				scope.AddHintProvider(logger, memory)
+				scope.AddHintProvider(logger, device)
+				resources := v1.ResourceList{v1.ResourceCPU: resource.MustParse("1"), v1.ResourceMemory: resource.MustParse("1Gi"), "domain1.com/resource1": resource.MustParse("2")}
+				pod := &v1.Pod{ObjectMeta: metav1.ObjectMeta{UID: "independent-device"}, Spec: v1.PodSpec{CPUNUMA: ptr.To[int32](2), MemNUMA: ptr.To[int32](3), Containers: []v1.Container{{Name: "app", Resources: v1.ResourceRequirements{Requests: resources, Limits: resources}}}}}
+				if automatic {
+					pod.Spec.CPUNUMA = nil
+				}
+				control := pod.DeepCopy()
+				control.UID = "unrelated-pod"
+				delete(control.Spec.Containers[0].Resources.Requests, "domain1.com/resource1")
+				delete(control.Spec.Containers[0].Resources.Limits, "domain1.com/resource1")
+				if result := scope.Admit(ctx, control, lifecycle.AddOperation); !result.Admit {
+					t.Fatalf("control admission = %+v", result)
+				}
+				if tc.finalFailure {
+					scope.AddHintProvider(logger, independentNUMAFailure{HintProvider: memory})
+				}
+				beforeCPU, beforeMemory := cpu.State().GetDefaultCPUSet(), memory.State().GetMachineState()
+				beforeCPUAssignments, beforeMemoryAssignments := cpu.State().GetCPUAssignments(), memory.State().GetMemoryAssignments()
+				for attempt := 0; attempt < 3; attempt++ {
+					result := scope.Admit(ctx, pod, lifecycle.AddOperation)
+					if tc.want != "" {
+						if result.Admit || !strings.Contains(result.Message, tc.want) {
+							t.Fatalf("admission = %+v, want %s", result, tc.want)
+						}
+						if !cpu.State().GetDefaultCPUSet().Equals(beforeCPU) || !reflect.DeepEqual(memory.State().GetMachineState(), beforeMemory) || !reflect.DeepEqual(cpu.State().GetCPUAssignments(), beforeCPUAssignments) || !reflect.DeepEqual(memory.State().GetMemoryAssignments(), beforeMemoryAssignments) || len(device.GetDevices(string(pod.UID), "app")) != 0 {
+							t.Fatal("failed admission leaked resources or changed unrelated assignments")
+						}
+						continue
 					}
-					if !cpu.State().GetDefaultCPUSet().Equals(beforeCPU) || !reflect.DeepEqual(memory.State().GetMachineState(), beforeMemory) || !reflect.DeepEqual(cpu.State().GetCPUAssignments(), beforeCPUAssignments) || !reflect.DeepEqual(memory.State().GetMemoryAssignments(), beforeMemoryAssignments) || len(device.GetDevices(string(pod.UID), "app")) != 0 {
-						t.Fatal("failed admission leaked resources or changed unrelated assignments")
+					if !result.Admit {
+						t.Fatalf("admission = %+v", result)
 					}
-					continue
+					if !cpu.GetCPUAffinity(string(pod.UID), "app").Equals(cpuset.New(2)) || !memory.GetMemoryNUMANodes(logger, pod, &pod.Spec.Containers[0]).Has(3) || len(device.GetDevices(string(pod.UID), "app")["domain1.com/resource1"]) != 2 {
+						t.Fatal("concrete device/CPU/memory placement did not match")
+					}
 				}
-				if !result.Admit {
-					t.Fatalf("admission = %+v", result)
-				}
-				if !cpu.GetCPUAffinity(string(pod.UID), "app").Equals(cpuset.New(2)) || !memory.GetMemoryNUMANodes(logger, pod, &pod.Spec.Containers[0]).Has(3) || len(device.GetDevices(string(pod.UID), "app")["domain1.com/resource1"]) != 2 {
-					t.Fatal("concrete device/CPU/memory placement did not match")
-				}
-			}
-		})
+			})
+		}
 	}
 }

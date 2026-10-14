@@ -144,7 +144,7 @@ func TestIndependentNUMAPlacementAdmission(t *testing.T) {
 		{name: "CPU-less CPU target", edit: func(p *v1.Pod, _ *cm.NodeConfig) { p.Spec.CPUNUMA = numaTestID(3) }, want: "eligible CPUs"},
 		{name: "legacy policy", edit: func(_ *v1.Pod, c *cm.NodeConfig) { c.TopologyManagerPolicy = "single-numa-node" }, want: "independent-numa"},
 		{name: "CPU partial", edit: func(p *v1.Pod, _ *cm.NodeConfig) { p.Spec.MemNUMA = nil }, want: "partial requests"},
-		{name: "memory partial", edit: func(p *v1.Pod, _ *cm.NodeConfig) { p.Spec.CPUNUMA = nil }, want: "partial requests"},
+		{name: "memory partial", edit: func(p *v1.Pod, _ *cm.NodeConfig) { p.Spec.CPUNUMA = nil }},
 		{name: "mixed fields", edit: func(p *v1.Pod, _ *cm.NodeConfig) { p.Spec.NUMANode = numaTestID(0) }, want: "cannot be combined"},
 		{name: "multiple applications", edit: func(p *v1.Pod, _ *cm.NodeConfig) { p.Spec.Containers = append(p.Spec.Containers, p.Spec.Containers[0]) }, want: "exactly one"},
 		{name: "init", edit: func(p *v1.Pod, _ *cm.NodeConfig) { p.Spec.InitContainers = []v1.Container{p.Spec.Containers[0]} }, want: "init or sidecar"},

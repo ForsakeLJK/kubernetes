@@ -34,7 +34,7 @@ type NUMAPlacement struct {
 }
 
 // ResolveNUMAPlacement keeps omitted independent targets unresolved. Admission
-// refuses partial requests until automatic placement is supported.
+// resolves automatic targets before allocation.
 func ResolveNUMAPlacement(pod *v1.Pod) NUMAPlacement {
 	if pod.Spec.CPUNUMA != nil || pod.Spec.MemNUMA != nil {
 		placement := NUMAPlacement{Required: true, Independent: true, CPU: -1, Memory: -1}
@@ -63,10 +63,10 @@ func ValidateIndependentNUMARequest(pod *v1.Pod) error {
 	if pod.Spec.NUMANode != nil {
 		return fmt.Errorf("numaNode cannot be combined with cpuNUMA or memNUMA")
 	}
-	if pod.Spec.CPUNUMA == nil || pod.Spec.MemNUMA == nil {
-		return fmt.Errorf("unsupported independent-numa slice: both cpuNUMA and memNUMA are required; partial requests are not implemented")
+	if pod.Spec.MemNUMA == nil {
+		return fmt.Errorf("unsupported independent-numa slice: memNUMA is required; CPU-only partial requests are not implemented")
 	}
-	if placement.CPU < 0 || placement.CPU > 63 || placement.Memory < 0 || placement.Memory > 63 {
+	if pod.Spec.CPUNUMA != nil && (placement.CPU < 0 || placement.CPU > 63) || placement.Memory < 0 || placement.Memory > 63 {
 		return fmt.Errorf("cpuNUMA and memNUMA must be between 0 and 63")
 	}
 	if len(pod.Spec.Containers) != 1 || len(pod.Spec.InitContainers) != 0 {

@@ -46,6 +46,9 @@ func (h *numaPlacementAdmitHandler) Admit(_ context.Context, attrs *lifecycle.Po
 		return lifecycle.PodAdmitResult{Reason: "NUMAPlacementUnsupported", Message: err.Error()}
 	}
 	id := placement.CPU
+	if id == -1 {
+		id = placement.Memory
+	}
 	policySupported := h.config.TopologyManagerPolicy == topologymanager.PolicySingleNumaNode || h.config.TopologyManagerPolicy == topologymanager.PolicyIndependentNUMA
 	policyNames := "single-numa-node or independent-numa"
 	if placement.Independent {
@@ -76,6 +79,9 @@ func (h *numaPlacementAdmitHandler) Admit(_ context.Context, attrs *lifecycle.Po
 		resource string
 		id       int
 	}{{"CPU", placement.CPU}, {"memory", placement.Memory}} {
+		if target.id == -1 {
+			continue
+		}
 		found, hasCPUs := false, false
 		for _, node := range info.Topology {
 			if node.Id == target.id {

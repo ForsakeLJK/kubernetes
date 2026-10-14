@@ -323,6 +323,24 @@ func (m *manager) checkNUMAPlacement(pod *v1.Pod, container *v1.Container) error
 	if !exists {
 		return nil
 	}
+	if placement.CPU == -1 {
+		nodes := m.topology.CPUDetails.KeepOnly(assigned).NUMANodes()
+		if nodes.Size() != 1 {
+			return fmt.Errorf("CPU assignment conflicts with automatic singleton NUMA placement: assigned CPUs %s", assigned)
+		}
+		placement.CPU = nodes.List()[0]
+		policy, ok := m.policy.(*staticPolicy)
+		if !ok {
+			return fmt.Errorf("automatic CPU placement requires the static CPU policy")
+		}
+		hint := policy.affinity.GetAffinity(klog.Background(), string(pod.UID), container.Name)
+		if hint.NUMANodeAffinity != nil {
+			if hint.NUMANodeAffinity.Count() != 1 {
+				return fmt.Errorf("automatic CPU placement requires a singleton NUMA affinity")
+			}
+			placement.CPU = hint.NUMANodeAffinity.GetBits()[0]
+		}
+	}
 	if assigned.IsEmpty() || !assigned.IsSubsetOf(m.topology.CPUDetails.CPUsInNUMANodes(placement.CPU)) {
 		return fmt.Errorf("CPU assignment conflicts with requested NUMA node %d: assigned CPUs %s", placement.CPU, assigned)
 	}
@@ -736,6 +754,12 @@ func (m *manager) GetCPUAffinity(podUID, containerName string) cpuset.CPUSet {
 func (m *manager) GetCPUNUMANodes(podUID, containerName string) sets.Set[int] {
 	cpus := m.GetCPUAffinity(podUID, containerName)
 	return sets.New(m.topology.CPUDetails.KeepOnly(cpus).NUMANodes().List()...)
+}
+
+// GetAssignedCPUNUMANodes excludes the shared pool when reconstructing a target.
+func (m *manager) GetAssignedCPUNUMANodes(podUID, containerName string) sets.Set[int] {
+	assigned, _ := m.state.GetCPUSet(podUID, containerName)
+	return sets.New(m.topology.CPUDetails.KeepOnly(assigned).NUMANodes().List()...)
 }
 
 func resourcesQualifyForExclusiveCPUs(container *v1.Container) bool {

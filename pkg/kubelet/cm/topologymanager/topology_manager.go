@@ -215,7 +215,7 @@ func NewManager(logger klog.Logger, topology []cadvisorapi.Node, topologyPolicyN
 
 	logger.Info("Creating topology manager with policy per scope", "topologyPolicyName", topologyPolicyName, "topologyScopeName", topologyScopeName, "topologyPolicyOptions", opts)
 
-	numaInfo, err := NewNUMAInfo(topology, opts)
+	numaInfo, err := newNUMAInfo(topology, opts, topologyPolicyName == PolicyIndependentNUMA)
 	if err != nil {
 		return nil, fmt.Errorf("cannot discover NUMA topology: %w", err)
 	}

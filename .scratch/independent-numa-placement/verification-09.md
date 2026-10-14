@@ -48,7 +48,8 @@ rows, unfinished commands and paths outside the run directory.
 From the Kubernetes repository root:
 
 - `python3 -m unittest discover -s .scratch/independent-numa-placement/runtime/tests -v`
-  — **9 tests pass** (1.223 seconds).
+  — **12 tests pass** (1.451 seconds) after review corrections; the pre-review
+  full suite passed nine tests (1.223 seconds).
 - `python3 -m unittest discover -s .scratch/independent-numa-placement/stream/tests -v`
   — **14 tests pass** (5.284 seconds), including actual serial STREAM smoke
   execution. These are the full relevant tooling suites. Kubernetes Go suites
@@ -58,11 +59,11 @@ From the Kubernetes repository root:
   followed by runtime `fixtures.py`, `capture.py`, `residency.py`,
   `check-residency.py`, `report.py` and legacy runtime `check-masks.py`,
   `masklib.py` — **pass**, seven source files.
-- `cc -std=c99 -D_GNU_SOURCE -Wall -Wextra -Werror .scratch/independent-numa-placement/runtime/probe.c -o /private/tmp/numa-ticket09-probe`
+- `cc -std=c99 -D_GNU_SOURCE -Wall -Wextra -Werror .scratch/independent-numa-placement/runtime/probe.c -o /private/tmp/numa-ticket09-probe-final`
   — **pass**, native macOS conditional path only.
-- `/private/tmp/numa-ticket09-probe --bytes 65536 --hold-seconds 0 --output /private/tmp/numa-ticket09-probe-smoke`
+- `/private/tmp/numa-ticket09-probe-final --bytes 65536 --hold-seconds 0 --output /private/tmp/numa-ticket09-probe-smoke-final`
   — **pass**, actual native anonymous allocation/touch and JSON artifact writing.
-- `python3 .scratch/independent-numa-placement/runtime/check-residency.py /private/tmp/numa-ticket09-probe-smoke/observation.json --memory-node 3 --output /private/tmp/numa-ticket09-probe-smoke/check.json`
+- `python3 .scratch/independent-numa-placement/runtime/check-residency.py /private/tmp/numa-ticket09-probe-smoke-final/observation.json --memory-node 3 --output /private/tmp/numa-ticket09-probe-smoke-final/check.json`
   — expected exit 2, **NOT RUN** residency: macOS returns recorded ENOSYS (78).
   No page-node observation or NUMA-placement result is claimed.
 - `hack/verify-boilerplate.sh .scratch/independent-numa-placement/runtime .scratch/explicit-numa-placement/runtime/check-masks.py .scratch/explicit-numa-placement/runtime/masklib.py`
@@ -74,12 +75,15 @@ From the Kubernetes repository root:
 Linux image build/run, Linux syscall branch, hugetlbfs mount/allocation,
 actual NUMA page queries, matched fork deployment, effective live container
 masks, VM/hardware matrix and DDR/HBM evaluation are **NOT RUN**. Ticket11 owns
-live execution. Native compilation and synthetic checker success do not replace
+live execution. `podman machine list --format json` returned `[]`, confirming
+no configured Linux Podman VM. Native compilation and synthetic checker success do not replace
 these observations. Ticket10 owns paired STREAM automation.
 
 ## Review
 
-Standards and Spec reviews against the starting commit are pending.
+Implementation commits: `8097aa017ca`, `a85bc8ad162`. Both independent
+reviewers examined the full diff against the recorded baseline and repeated
+their original repros after correction.
 
 Initial independent review found one placement-consistency issue on the
 Standards axis and two evidence-handling issues on the Spec axis: residency
@@ -89,3 +93,22 @@ reproduced with a failing CLI regression and corrected. Reports now correlate
 namespace/Pod/container identities, require configured hugepage prerequisites,
 and preserve a NOT RUN case for malformed command evidence. Probe artifacts
 also publish atomically, avoiding partial reads during observation collection.
+
+
+## Standards
+
+Final independent review through `a85bc8ad162`: no remaining documented-standard
+violations or actionable baseline smells. The original target-consistency repro
+now reports FAIL for every affected container. All 12 runtime CLI tests pass
+independently; atomic publication and the wait procedure address partial reads.
+No additional concrete correctness bugs were found.
+
+## Spec
+
+Final independent review through `a85bc8ad162`: zero remaining findings. Empty
+hugepage prerequisites now produce NOT RUN; non-object command JSON produces a
+complete report with NOT RUN and no traceback. All 12 tests pass independently.
+No missing requirements, scope creep or incorrect behavior was found. Live
+execution correctly remains ticket11.
+
+Review totals: Standards 0 remaining; Spec 0 remaining.

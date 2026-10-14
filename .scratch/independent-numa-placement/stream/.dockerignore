@@ -1,0 +1,10 @@
+*
+!Dockerfile
+!source.json
+!base-image.txt
+!run.py
+!parse.py
+!observe.c
+!observe.h
+!upstream/
+!upstream/stream.c

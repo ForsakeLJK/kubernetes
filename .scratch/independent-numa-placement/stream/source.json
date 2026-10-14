@@ -1,0 +1,7 @@
+{
+  "url": "https://www.cs.virginia.edu/stream/FTP/Code/stream.c",
+  "revision": "5.10 (2013-01-17)",
+  "sha256": "a52bae5e175bea3f7832112af9c085adab47117f7d2ce219165379849231692b",
+  "license": "John D. McCalpin STREAM license in upstream/stream.c; publication/run-rule restrictions apply",
+  "retrieved": "2026-10-14"
+}

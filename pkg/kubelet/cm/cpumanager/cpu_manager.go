@@ -319,6 +319,13 @@ func (m *manager) checkNUMAPlacement(pod *v1.Pod, container *v1.Container) error
 	if !placement.Required {
 		return nil
 	}
+	if placement.Independent {
+		if err := topologymanager.CheckPodNUMANodes(pod, "CPU", placement.CPU, func(c *v1.Container) sets.Set[int] {
+			return m.GetAssignedCPUNUMANodes(string(pod.UID), c.Name)
+		}); err != nil {
+			return err
+		}
+	}
 	assigned, exists := m.state.GetCPUSet(string(pod.UID), container.Name)
 	if !exists {
 		return nil
@@ -383,8 +390,14 @@ func (m *manager) SnapshotNUMAPlacement(pod *v1.Pod, container *v1.Container) fu
 		alreadyOwned = alreadyOwned.Union(cpus)
 	}
 	reusable, hadReusable := cpuset.New(), false
+	otherReusable := make(map[string]cpuset.CPUSet)
 	if policy, ok := m.policy.(*staticPolicy); ok {
 		reusable, hadReusable = policy.cpusToReuse[podUID]
+		for uid, cpus := range policy.cpusToReuse {
+			if uid != podUID {
+				otherReusable[uid] = cpus
+			}
+		}
 	}
 	allocated := m.numaPlacementAllocations[key]
 	return func(klog.Logger) error {
@@ -400,6 +413,11 @@ func (m *manager) SnapshotNUMAPlacement(pod *v1.Pod, container *v1.Container) fu
 			m.state.Delete(podUID, name)
 		}
 		if policy, ok := m.policy.(*staticPolicy); ok {
+			for uid, cpus := range otherReusable {
+				if _, present := policy.cpusToReuse[uid]; !present {
+					policy.cpusToReuse[uid] = cpus
+				}
+			}
 			if hadReusable {
 				policy.cpusToReuse[podUID] = reusable
 			} else {

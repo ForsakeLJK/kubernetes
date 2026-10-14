@@ -948,6 +948,21 @@ func (p *staticPolicy) allocateForAdd(logger klog.Logger, s state.State, pod *v1
 		}
 		nodeCPUs := p.topology.CPUDetails.CPUsInNUMANodes(placement.CPU)
 		reusable := p.cpusToReuse[string(pod.UID)].Intersection(nodeCPUs)
+		if placement.Independent {
+			overlapping := cpuset.New()
+			for sibling := range podutil.ContainerIter(&pod.Spec, podutil.Containers|podutil.InitContainers) {
+				if sibling.Name == container.Name {
+					continue
+				}
+				assigned, _ := s.GetCPUSet(string(pod.UID), sibling.Name)
+				if topologymanager.NUMAContainersOverlap(pod, container, sibling) {
+					overlapping = overlapping.Union(assigned)
+				} else {
+					reusable = reusable.Union(assigned.Intersection(nodeCPUs))
+				}
+			}
+			reusable = reusable.Difference(overlapping)
+		}
 		available := p.GetAvailableCPUs(s).Intersection(nodeCPUs).Union(reusable)
 		if available.Size() < numCPUs {
 			return fmt.Errorf("insufficient eligible CPUs on requested NUMA node %d: need %d, have %d", placement.CPU, numCPUs, available.Size())

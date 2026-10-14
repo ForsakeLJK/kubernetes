@@ -327,6 +327,17 @@ func (m *manager) checkNUMAPlacement(pod *v1.Pod, container *v1.Container) error
 	if !placement.Required {
 		return nil
 	}
+	if placement.Independent {
+		if err := topologymanager.CheckPodNUMANodes(pod, "memory", placement.Memory, func(c *v1.Container) sets.Set[int] {
+			nodes := sets.New[int]()
+			for _, block := range m.state.GetMemoryBlocks(string(pod.UID), c.Name) {
+				nodes.Insert(block.NUMAAffinity...)
+			}
+			return nodes
+		}); err != nil {
+			return err
+		}
+	}
 	blocks := m.state.GetMemoryBlocks(string(pod.UID), container.Name)
 	if blocks == nil {
 		return nil
@@ -402,7 +413,13 @@ func (m *manager) SnapshotNUMAPlacement(pod *v1.Pod, _ *v1.Container) func(klog.
 	assignments := m.state.GetMemoryAssignments()[podUID]
 	before, snapshotErr := numaPlacementMemoryTotals(assignments)
 	reusable := make(map[string]map[v1.ResourceName]uint64)
+	otherReusable := reusableMemory{}
 	if policy, ok := m.policy.(*staticPolicy); ok {
+		for uid, memory := range policy.initContainersReusableMemory {
+			if uid != podUID {
+				otherReusable[uid] = memory
+			}
+		}
 		for mask, resources := range policy.initContainersReusableMemory[podUID] {
 			reusable[mask] = make(map[v1.ResourceName]uint64, len(resources))
 			for name, size := range resources {
@@ -471,6 +488,11 @@ func (m *manager) SnapshotNUMAPlacement(pod *v1.Pod, _ *v1.Container) func(klog.
 		}
 		m.state.SetMemoryAssignments(currentAssignments)
 		if policy, ok := m.policy.(*staticPolicy); ok {
+			for uid, memory := range otherReusable {
+				if _, present := policy.initContainersReusableMemory[uid]; !present {
+					policy.initContainersReusableMemory[uid] = memory
+				}
+			}
 			if len(reusable) == 0 {
 				delete(policy.initContainersReusableMemory, podUID)
 			} else {

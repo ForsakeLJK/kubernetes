@@ -316,9 +316,15 @@ mandatory through allocation, runtime configuration, and recovery; CPUs cannot
 span nodes to satisfy the request. The `prefer-closest-numa-nodes` option is not
 required for this selection.
 
-CPU-only requests, multiple application containers, init/sidecar containers,
-and hugepages are refused with unsupported-slice diagnostics pending their
-follow-up tickets. Pod budgets, resize, and ephemeral containers are excluded.
+CPU-only requests use the same restored/common/nearest ordering to select one
+memory node, which may have no CPUs. Every application container, sequential
+init container, and restartable sidecar shares the Pod's CPU/memory node pair.
+Concrete CPU sets and memory quantities retain sequential init reuse and
+sidecar overlap. Recovery preserves surviving assignments, including when
+completed init allocations have already been released.
+
+Hugepages are refused with unsupported-slice diagnostics pending ticket 07.
+Pod budgets, resize, and ephemeral containers are excluded.
 Ordinary and legacy Pods retain their existing behavior.
 
 Successful split admissions increment

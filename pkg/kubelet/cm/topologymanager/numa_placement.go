@@ -21,6 +21,8 @@ import (
 	"strings"
 
 	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/sets"
+	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
 	v1qos "k8s.io/kubernetes/pkg/apis/core/v1/helper/qos"
 )
 
@@ -31,6 +33,47 @@ type NUMAPlacement struct {
 	CPU         int
 	Memory      int
 	Independent bool
+}
+
+// CheckPodNUMANodes checks surviving assignments, including init allocations
+// whose resources have been reused. Missing assignments do not choose a target.
+func CheckPodNUMANodes(pod *v1.Pod, resource string, target int, assignedNodes func(*v1.Container) sets.Set[int]) error {
+	for _, container := range append(pod.Spec.InitContainers, pod.Spec.Containers...) {
+		nodes := assignedNodes(&container)
+		if nodes.Len() == 0 {
+			continue
+		}
+		if nodes.Len() != 1 || target != -1 && !nodes.Has(target) {
+			return fmt.Errorf("%s assignment conflicts with Pod-wide singleton NUMA placement (target %d): container %s uses nodes %v", resource, target, container.Name, sets.List(nodes))
+		}
+		target = sets.List(nodes)[0]
+	}
+	return nil
+}
+
+// NUMAContainersOverlap follows sequential init and restartable sidecar
+// lifetimes, including assignments preallocated for containers not yet started.
+func NUMAContainersOverlap(pod *v1.Pod, first, second *v1.Container) bool {
+	position := func(container *v1.Container) (int, bool) {
+		for index, init := range pod.Spec.InitContainers {
+			if init.Name == container.Name {
+				return index, !podutil.IsRestartableInitContainer(&init)
+			}
+		}
+		return len(pod.Spec.InitContainers), false
+	}
+	firstIndex, firstRegular := position(first)
+	secondIndex, secondRegular := position(second)
+	if firstRegular && secondRegular {
+		return false
+	}
+	if firstRegular {
+		return secondIndex < firstIndex
+	}
+	if secondRegular {
+		return firstIndex < secondIndex
+	}
+	return true
 }
 
 // ResolveNUMAPlacement keeps omitted independent targets unresolved. Admission
@@ -66,8 +109,8 @@ func ValidateIndependentNUMARequest(pod *v1.Pod) error {
 	if pod.Spec.CPUNUMA != nil && (placement.CPU < 0 || placement.CPU > 63) || pod.Spec.MemNUMA != nil && (placement.Memory < 0 || placement.Memory > 63) {
 		return fmt.Errorf("cpuNUMA and memNUMA must be between 0 and 63")
 	}
-	if len(pod.Spec.Containers) != 1 || len(pod.Spec.InitContainers) != 0 {
-		return fmt.Errorf("unsupported independent-numa slice: exactly one application container and no init or sidecar containers are supported")
+	if len(pod.Spec.Containers) == 0 {
+		return fmt.Errorf("NUMA placement requires at least one application container")
 	}
 	if pod.Spec.Resources != nil {
 		return fmt.Errorf("pod-level resources are not supported with NUMA placement")
@@ -78,19 +121,20 @@ func ValidateIndependentNUMARequest(pod *v1.Pod) error {
 	if pod.Spec.OS != nil && pod.Spec.OS.Name != v1.Linux {
 		return fmt.Errorf("independent NUMA placement requires a Linux Pod")
 	}
-	if v1qos.GetPodQOS(pod) != v1.PodQOSGuaranteed {
+	if v1qos.ComputePodQOS(pod) != v1.PodQOSGuaranteed {
 		return fmt.Errorf("NUMA placement requires Guaranteed equal CPU and memory requests and limits")
 	}
-	container := &pod.Spec.Containers[0]
-	cpu := container.Resources.Requests[v1.ResourceCPU]
-	_, isWhole := cpu.AsScale(0)
-	if !isWhole || cpu.Sign() <= 0 {
-		return fmt.Errorf("NUMA placement requires a positive whole number of CPUs")
-	}
-	for _, resources := range []v1.ResourceList{container.Resources.Requests, container.Resources.Limits} {
-		for name := range resources {
-			if strings.HasPrefix(string(name), v1.ResourceHugePagesPrefix) {
-				return fmt.Errorf("unsupported independent-numa slice: hugepage requests are not implemented (%s)", name)
+	for _, container := range append(pod.Spec.InitContainers, pod.Spec.Containers...) {
+		cpu := container.Resources.Requests[v1.ResourceCPU]
+		_, isWhole := cpu.AsScale(0)
+		if !isWhole || cpu.Sign() <= 0 {
+			return fmt.Errorf("container %s: NUMA placement requires a positive whole number of CPUs", container.Name)
+		}
+		for _, resources := range []v1.ResourceList{container.Resources.Requests, container.Resources.Limits} {
+			for name := range resources {
+				if strings.HasPrefix(string(name), v1.ResourceHugePagesPrefix) {
+					return fmt.Errorf("container %s: unsupported independent-numa slice: hugepage requests are not implemented (%s)", container.Name, name)
+				}
 			}
 		}
 	}

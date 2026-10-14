@@ -23,6 +23,7 @@ import (
 	"k8s.io/klog/v2"
 	pluginapi "k8s.io/kubelet/pkg/apis/deviceplugin/v1beta1"
 
+	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
 	"k8s.io/kubernetes/pkg/kubelet/cm/topologymanager"
 	"k8s.io/kubernetes/pkg/kubelet/cm/topologymanager/bitmask"
 	"k8s.io/kubernetes/pkg/kubelet/lifecycle"
@@ -104,6 +105,17 @@ func (m *ManagerImpl) GetPodTopologyHints(logger klog.Logger, pod *v1.Pod, _ lif
 		// devices allocated to the Pod. This might happen after a
 		// kubelet restart, for example.
 		allocated := m.podDevices.podDevices(string(pod.UID), resource)
+		if topologymanager.ResolveNUMAPlacement(pod).Independent {
+			active := sets.New[string]()
+			for container := range podutil.ContainerIter(&pod.Spec, podutil.Containers|podutil.InitContainers) {
+				active = active.Union(m.podDevices.containerDevices(string(pod.UID), container.Name, resource))
+			}
+			available := m.getAvailableDevices(resource).Union(allocated.Difference(active))
+			// Surviving devices constrain CPU coordination while missing
+			// containers still need capacity from the unassigned pool.
+			deviceHints[resource] = m.generateDeviceTopologyHints(logger, resource, available, active, requested)
+			continue
+		}
 		if allocated.Len() > 0 {
 			if allocated.Len() != requested {
 				logger.Info("Resource already allocated to pod with different number than request", "resourceName", resource, "pod", klog.KObj(pod), "request", requested, "allocated", allocated.Len())

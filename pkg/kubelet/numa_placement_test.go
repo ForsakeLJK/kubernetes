@@ -150,8 +150,14 @@ func TestIndependentNUMAPlacementAdmission(t *testing.T) {
 		{name: "CPU partial out-of-range CPU", edit: func(p *v1.Pod, _ *cm.NodeConfig) { p.Spec.MemNUMA = nil; p.Spec.CPUNUMA = numaTestID(64) }, want: "between 0 and 63"},
 		{name: "memory partial", edit: func(p *v1.Pod, _ *cm.NodeConfig) { p.Spec.CPUNUMA = nil }},
 		{name: "mixed fields", edit: func(p *v1.Pod, _ *cm.NodeConfig) { p.Spec.NUMANode = numaTestID(0) }, want: "cannot be combined"},
-		{name: "multiple applications", edit: func(p *v1.Pod, _ *cm.NodeConfig) { p.Spec.Containers = append(p.Spec.Containers, p.Spec.Containers[0]) }, want: "exactly one"},
-		{name: "init", edit: func(p *v1.Pod, _ *cm.NodeConfig) { p.Spec.InitContainers = []v1.Container{p.Spec.Containers[0]} }, want: "init or sidecar"},
+		{name: "multiple applications", edit: func(p *v1.Pod, _ *cm.NodeConfig) {
+			p.Spec.Containers = append(p.Spec.Containers, *p.Spec.Containers[0].DeepCopy())
+			p.Spec.Containers[1].Name = "second"
+		}},
+		{name: "init", edit: func(p *v1.Pod, _ *cm.NodeConfig) {
+			p.Spec.InitContainers = []v1.Container{*p.Spec.Containers[0].DeepCopy()}
+			p.Spec.InitContainers[0].Name = "init"
+		}},
 		{name: "hugepages", edit: func(p *v1.Pod, _ *cm.NodeConfig) {
 			p.Spec.Containers[0].Resources.Requests[v1.ResourceName("hugepages-2Mi")] = resource.MustParse("2Mi")
 		}, want: "hugepage requests"},
@@ -175,5 +181,54 @@ func TestIndependentNUMAPlacementAdmission(t *testing.T) {
 				t.Fatalf("admission = %+v, want %q", result, tc.want)
 			}
 		})
+	}
+}
+
+func TestIndependentNUMAPodWideDeclarations(t *testing.T) {
+	config := cm.NodeConfig{CPUManagerPolicy: "static", MemoryManagerPolicy: "Static", TopologyManagerPolicy: "independent-numa", TopologyManagerScope: "pod"}
+	h := &numaPlacementAdmitHandler{goos: "linux", config: config, getMachineInfo: func() (*cadvisorapi.MachineInfo, error) {
+		return &cadvisorapi.MachineInfo{Topology: []cadvisorapi.Node{{Id: 0, Cores: []cadvisorapi.Core{{Threads: []int{0, 1}}}}, {Id: 3}}}, nil
+	}}
+	for _, form := range []string{"explicit", "CPU-only", "memory-only"} {
+		for _, kind := range []string{"application", "init", "sidecar"} {
+			for _, invalid := range []string{"valid", "fractional CPU", "unequal memory", "hugepages"} {
+				t.Run(form+"/"+kind+"/"+invalid, func(t *testing.T) {
+					resources := v1.ResourceList{v1.ResourceCPU: resource.MustParse("1"), v1.ResourceMemory: resource.MustParse("256Mi")}
+					app := v1.Container{Name: "app", Resources: v1.ResourceRequirements{Requests: resources.DeepCopy(), Limits: resources.DeepCopy()}}
+					other := app.DeepCopy()
+					other.Name = "other"
+					switch invalid {
+					case "fractional CPU":
+						other.Resources.Requests[v1.ResourceCPU] = resource.MustParse("0.9999")
+						other.Resources.Limits[v1.ResourceCPU] = resource.MustParse("0.9999")
+					case "unequal memory":
+						other.Resources.Limits[v1.ResourceMemory] = resource.MustParse("512Mi")
+					case "hugepages":
+						other.Resources.Limits["hugepages-2Mi"] = resource.MustParse("2Mi")
+					}
+					pod := &v1.Pod{Spec: v1.PodSpec{CPUNUMA: numaTestID(0), MemNUMA: numaTestID(3), Containers: []v1.Container{app}}}
+					if form == "CPU-only" {
+						pod.Spec.MemNUMA = nil
+					}
+					if form == "memory-only" {
+						pod.Spec.CPUNUMA = nil
+					}
+					if kind == "application" {
+						pod.Spec.Containers = append(pod.Spec.Containers, *other)
+					} else {
+						if kind == "sidecar" {
+							restart := v1.ContainerRestartPolicyAlways
+							other.RestartPolicy = &restart
+						}
+						pod.Spec.InitContainers = []v1.Container{*other}
+					}
+					pod.Status.QOSClass = v1.PodQOSGuaranteed
+					result := h.Admit(context.Background(), &lifecycle.PodAdmitAttributes{Pod: pod})
+					if result.Admit != (invalid == "valid") {
+						t.Fatalf("admission = %+v", result)
+					}
+				})
+			}
+		}
 	}
 }

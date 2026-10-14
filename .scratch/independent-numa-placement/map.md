@@ -1,6 +1,6 @@
 # Independent CPU and memory NUMA placement design
 
-Status: design and ticket breakdown approved on 2026-10-14; 11 tickets published. Tickets 01 through 05 are resolved; the remaining software/tooling tickets are not implemented.
+Status: design and ticket breakdown approved on 2026-10-14; 11 tickets published. Tickets 01 through 06 are resolved; the remaining software/tooling tickets are not implemented.
 
 Review: [specification](spec.md), [implementation plan](implementation-plan.md),
 and [validation plan](validation-plan.md).
@@ -16,6 +16,14 @@ single shared CPU/memory target and required single-numa-node alignment conflict
 with the new split-target use case and need an explicit design revision.
 
 ## Decisions-so-far
+
+- Ticket 06 resolved on 2026-10-14: explicit, CPU-only, and memory-only forms
+  share one placement pair across applications, sequential inits, and sidecars.
+  Lifetime-aware reuse, later-failure rollback, partial recovery, device
+  coordination, and runtime masks are covered. Focused checks and both review
+  axes pass; all 143 full-suite failure names/packages match ticket 05. See
+  [verification-06.md](verification-06.md) and the
+  [ticket answer](issues/06-enforce-pod-wide-placement.md#answer).
 
 - Ticket 05 resolved on 2026-10-14: CPU-only requests select and preserve one
   feasible automatic memory node, including CPU-less nodes, using restored/common/
@@ -143,7 +151,7 @@ No parent issue was closed or modified.
 | [10: Automate paired STREAM evaluation and evidence reporting](issues/10-automate-paired-stream-evaluation.md) | 08, 09 | ready-for-agent |
 | [11: Record user-operated VM or hardware acceptance evidence](issues/11-record-manual-runtime-evidence.md) | 10 | ready-for-agent |
 
-Current frontier after ticket 04: **05 and 08**.
+Current frontier after ticket 06: **07 and 08**.
 
 Initial frontier: **01 and 08**. A ready-for-agent status means the ticket is
 prepared, not that its dependencies are resolved. Claim only a ticket whose

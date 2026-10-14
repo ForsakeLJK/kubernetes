@@ -26,6 +26,7 @@ import (
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	resourcehelper "k8s.io/component-helpers/resource"
 	"k8s.io/klog/v2"
+	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
 	corehelper "k8s.io/kubernetes/pkg/apis/core/v1/helper"
 	"k8s.io/kubernetes/pkg/features"
 	"k8s.io/kubernetes/pkg/kubelet/cm/admission"
@@ -115,6 +116,11 @@ func (s *podScope) admitUsingContainerResources(ctx context.Context, pod *v1.Pod
 
 	var acquired []func() error
 	for _, container := range append(pod.Spec.InitContainers, pod.Spec.Containers...) {
+		if placement.Independent && completedInitContainer(pod, &container) {
+			// Released sequential init assignments must not be recreated over
+			// the surviving applications and sidecars during recovery.
+			continue
+		}
 		logger.Info("Topology Affinity", "bestHint", bestHint, "memoryHint", memoryHint, "pod", klog.KObj(pod), "containerName", container.Name)
 		if placement.Required {
 			acquired = append(acquired, s.snapshotTopologyHints(string(pod.UID), container.Name))
@@ -176,7 +182,7 @@ func (s *podScope) requestedPlacement(logger klog.Logger, pod *v1.Pod, placement
 	}
 	restored := -1
 	for _, provider := range s.hintProviders {
-		for _, container := range pod.Spec.Containers {
+		for _, container := range append(pod.Spec.InitContainers, pod.Spec.Containers...) {
 			nodes := sets.New[int]()
 			if cpu, ok := provider.(interface {
 				GetAssignedCPUNUMANodes(string, string) sets.Set[int]
@@ -232,6 +238,20 @@ func (s *podScope) requestedPlacement(logger klog.Logger, pod *v1.Pod, placement
 		return NUMAPlacement{}, numaPlacementError{err.Error()}
 	}
 	return selected, nil
+}
+
+func completedInitContainer(pod *v1.Pod, container *v1.Container) bool {
+	for _, init := range pod.Spec.InitContainers {
+		if init.Name != container.Name || podutil.IsRestartableInitContainer(&init) {
+			continue
+		}
+		for _, status := range pod.Status.InitContainerStatuses {
+			if status.Name == container.Name && status.State.Terminated != nil && status.State.Terminated.ExitCode == 0 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (s *podScope) requestedAffinityFromHints(logger klog.Logger, pod *v1.Pod, placement NUMAPlacement, hints []map[string][]TopologyHint) (TopologyHint, error) {
@@ -439,6 +459,18 @@ func (s *podScope) hasCommonNUMAPlacement(logger klog.Logger, pod *v1.Pod) bool 
 
 func (s *podScope) accumulateProvidersHints(logger klog.Logger, pod *v1.Pod, operation lifecycle.Operation) []map[string][]TopologyHint {
 	var providersHints []map[string][]TopologyHint
+	if ResolveNUMAPlacement(pod).Independent {
+		// Completed sequential init containers have no future demand. Keep
+		// their concrete assignments in recovery checks, outside this view.
+		activePod := pod.DeepCopy()
+		activePod.Spec.InitContainers = nil
+		for _, init := range pod.Spec.InitContainers {
+			if !completedInitContainer(pod, &init) {
+				activePod.Spec.InitContainers = append(activePod.Spec.InitContainers, init)
+			}
+		}
+		pod = activePod
+	}
 
 	for _, provider := range s.hintProviders {
 		// Get the TopologyHints for a Pod from a provider.

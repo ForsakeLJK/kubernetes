@@ -499,6 +499,37 @@ func (p *staticPolicy) Allocate(ctx context.Context, s state.State, pod *v1.Pod,
 		logger.Info("Container already present in state, skipping")
 		return nil
 	}
+	if placement.Independent && isRegularInitContainer(pod, container) {
+		// Future assignments already pay for part of this sequential init's
+		// peak. Keep those blocks intact and charge only its residual demand.
+		future := make(map[v1.ResourceName]uint64)
+		afterCurrent := false
+		for sibling := range podutil.ContainerIter(&pod.Spec, podutil.InitContainers|podutil.Containers) {
+			if sibling.Name == container.Name {
+				afterCurrent = true
+				continue
+			}
+			if !afterCurrent || topologymanager.NUMAContainersOverlap(pod, container, sibling) {
+				continue
+			}
+			for _, block := range s.GetMemoryBlocks(podUID, sibling.Name) {
+				future[block.Type] += block.Size
+			}
+		}
+		for name, size := range requestedResources {
+			requestedResources[name] = size - min(size, future[name])
+		}
+	}
+	if placement.Independent {
+		for _, init := range pod.Spec.InitContainers {
+			if init.Name == container.Name {
+				break
+			}
+			if isRegularInitContainer(pod, &init) {
+				p.updatePodReusableMemory(pod, &init, s.GetMemoryBlocks(podUID, init.Name))
+			}
+		}
+	}
 
 	// Call Topology Manager to get the aligned affinity across all hint providers.
 	hint := topologymanager.GetMemoryAffinity(p.affinity, logger, podUID, container.Name)

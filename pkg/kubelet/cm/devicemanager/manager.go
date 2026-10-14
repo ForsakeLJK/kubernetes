@@ -415,6 +415,22 @@ func (m *ManagerImpl) Allocate(ctx context.Context, pod *v1.Pod, container *v1.C
 			delete(m.devicesToReuse, podUID)
 		}
 	}
+	if topologymanager.ResolveNUMAPlacement(pod).Independent {
+		overlapping := make(map[string]sets.Set[string])
+		for sibling := range podutil.ContainerIter(&pod.Spec, podutil.Containers|podutil.InitContainers) {
+			if sibling.Name == container.Name {
+				continue
+			}
+			if topologymanager.NUMAContainersOverlap(pod, container, sibling) {
+				m.podDevices.addContainerAllocatedResources(string(pod.UID), sibling.Name, overlapping)
+			} else {
+				m.podDevices.addContainerAllocatedResources(string(pod.UID), sibling.Name, m.devicesToReuse[string(pod.UID)])
+			}
+		}
+		for resource, devices := range overlapping {
+			m.devicesToReuse[string(pod.UID)][resource] = m.devicesToReuse[string(pod.UID)][resource].Difference(devices)
+		}
+	}
 	// Allocate resources for init containers first as we know the caller always loops
 	// through init containers before looping through app containers. Should the caller
 	// ever change those semantics, this logic will need to be amended.
@@ -446,6 +462,14 @@ func (m *ManagerImpl) Allocate(ctx context.Context, pod *v1.Pod, container *v1.C
 // placement attempt. Existing checkpointed records are outside that attempt.
 func (m *ManagerImpl) SnapshotNUMAPlacement(pod *v1.Pod, container *v1.Container) func(klog.Logger) error {
 	podUID, containerName := string(pod.UID), container.Name
+	_, hadReusable := m.devicesToReuse[podUID]
+	reusable := make(PodReusableDevices)
+	for uid, resources := range m.devicesToReuse {
+		reusable[uid] = make(map[string]sets.Set[string])
+		for resource, devices := range resources {
+			reusable[uid][resource] = devices.Clone()
+		}
+	}
 	m.podDevices.RLock()
 	previous := make(map[string]bool)
 	for resource := range m.podDevices.devs[podUID][containerName] {
@@ -465,6 +489,16 @@ func (m *ManagerImpl) SnapshotNUMAPlacement(pod *v1.Pod, container *v1.Container
 		m.podDevices.Unlock()
 		if changed {
 			m.regenerateAllocatedDevicesLocked()
+		}
+		// Allocate can consume this Pod's reuse pool and prune other Pods'
+		// pools. Restore deleted entries without overwriting intervening work.
+		for uid, resources := range reusable {
+			if _, present := m.devicesToReuse[uid]; uid == podUID || !present {
+				m.devicesToReuse[uid] = resources
+			}
+		}
+		if !hadReusable {
+			delete(m.devicesToReuse, podUID)
 		}
 		m.mutex.Unlock()
 		if changed {

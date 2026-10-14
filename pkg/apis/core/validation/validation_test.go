@@ -24783,6 +24783,8 @@ func TestValidateOSFields(t *testing.T) {
 	// - Add validation logic validateLinux, validateWindows functions to make sure the field is only set for eligible OSes
 	osSpecificFields := sets.NewString(
 		"NUMANode",
+		"CPUNUMA",
+		"MemNUMA",
 		"Containers[*].SecurityContext.AppArmorProfile",
 		"Containers[*].SecurityContext.AllowPrivilegeEscalation",
 		"Containers[*].SecurityContext.Capabilities",

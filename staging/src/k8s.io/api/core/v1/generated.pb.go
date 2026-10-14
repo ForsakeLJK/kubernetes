@@ -10020,6 +10020,20 @@ func (m *PodSpec) MarshalToSizedBuffer(dAtA []byte) (int, error) {
 	_ = i
 	var l int
 	_ = l
+	if m.MemNUMA != nil {
+		i = encodeVarintGenerated(dAtA, i, uint64(*m.MemNUMA))
+		i--
+		dAtA[i] = 0x2
+		i--
+		dAtA[i] = 0xf8
+	}
+	if m.CPUNUMA != nil {
+		i = encodeVarintGenerated(dAtA, i, uint64(*m.CPUNUMA))
+		i--
+		dAtA[i] = 0x2
+		i--
+		dAtA[i] = 0xf0
+	}
 	if m.NUMANode != nil {
 		i = encodeVarintGenerated(dAtA, i, uint64(*m.NUMANode))
 		i--
@@ -19274,6 +19288,12 @@ func (m *PodSpec) Size() (n int) {
 	if m.NUMANode != nil {
 		n += 2 + sovGenerated(uint64(*m.NUMANode))
 	}
+	if m.CPUNUMA != nil {
+		n += 2 + sovGenerated(uint64(*m.CPUNUMA))
+	}
+	if m.MemNUMA != nil {
+		n += 2 + sovGenerated(uint64(*m.MemNUMA))
+	}
 	return n
 }
 
@@ -23871,6 +23891,8 @@ func (this *PodSpec) String() string {
 		`SchedulingGroup:` + strings.Replace(this.SchedulingGroup.String(), "PodSchedulingGroup", "PodSchedulingGroup", 1) + `,`,
 		`EvictionResponders:` + repeatedStringForEvictionResponders + `,`,
 		`NUMANode:` + valueToStringGenerated(this.NUMANode) + `,`,
+		`CPUNUMA:` + valueToStringGenerated(this.CPUNUMA) + `,`,
+		`MemNUMA:` + valueToStringGenerated(this.MemNUMA) + `,`,
 		`}`,
 	}, "")
 	return s
@@ -56955,6 +56977,46 @@ func (m *PodSpec) Unmarshal(dAtA []byte) error {
 				}
 			}
 			m.NUMANode = &v
+		case 46:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field CPUNUMA", wireType)
+			}
+			var v int32
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowGenerated
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				v |= int32(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			m.CPUNUMA = &v
+		case 47:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field MemNUMA", wireType)
+			}
+			var v int32
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return ErrIntOverflowGenerated
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				v |= int32(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			m.MemNUMA = &v
 		default:
 			iNdEx = preIndex
 			skippy, err := skipGenerated(dAtA[iNdEx:])

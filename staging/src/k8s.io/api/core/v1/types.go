@@ -4710,6 +4710,8 @@ type PodSpec struct {
 	// - spec.hostUsers
 	// - spec.resources
 	// - spec.numaNode
+	// - spec.cpuNUMA
+	// - spec.memNUMA
 	// - spec.securityContext.appArmorProfile
 	// - spec.securityContext.seLinuxOptions
 	// - spec.securityContext.seccompProfile
@@ -4851,6 +4853,19 @@ type PodSpec struct {
 	// This field is immutable.
 	// +optional
 	NUMANode *int32 `json:"numaNode,omitempty" protobuf:"varint,45,opt,name=numaNode"`
+
+	// cpuNUMA is the required CPU NUMA node. Zero selects node 0; omission
+	// leaves CPU placement automatic. Requires Linux and independent-numa
+	// with pod scope, and cannot be combined with numaNode. This field is immutable.
+	// +optional
+	CPUNUMA *int32 `json:"cpuNUMA,omitempty" protobuf:"varint,46,opt,name=cpuNUMA"`
+
+	// memNUMA is the required memory NUMA node, which may have no CPUs.
+	// Zero selects node 0; omission leaves memory placement automatic.
+	// Requires Linux and independent-numa with pod scope, and cannot be
+	// combined with numaNode. This field is immutable.
+	// +optional
+	MemNUMA *int32 `json:"memNUMA,omitempty" protobuf:"varint,47,opt,name=memNUMA"`
 }
 
 // PodResourceClaim references exactly one ResourceClaim, either directly

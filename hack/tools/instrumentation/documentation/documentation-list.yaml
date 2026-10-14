@@ -4886,6 +4886,15 @@
   componentEndpoints:
   - component: kubelet
     endpoint: /metrics
+- name: topology_manager_split_numa_admissions_total
+  subsystem: kubelet
+  help: The number of successful independent NUMA admissions with different CPU and
+    memory nodes.
+  type: Counter
+  stabilityLevel: ALPHA
+  componentEndpoints:
+  - component: kubelet
+    endpoint: /metrics
 - name: volume_metric_collection_duration_seconds
   subsystem: kubelet
   help: Duration in seconds to calculate volume stats

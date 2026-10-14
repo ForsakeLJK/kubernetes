@@ -446,6 +446,7 @@ spec:
           subPath: subPathValue
           subPathExpr: subPathExprValue
         workingDir: workingDirValue
+      cpuNUMA: 46
       dnsConfig:
         nameservers:
         - nameserversValue
@@ -928,6 +929,7 @@ spec:
           subPath: subPathValue
           subPathExpr: subPathExprValue
         workingDir: workingDirValue
+      memNUMA: 47
       nodeName: nodeNameValue
       nodeSelector:
         nodeSelectorKey: nodeSelectorValue

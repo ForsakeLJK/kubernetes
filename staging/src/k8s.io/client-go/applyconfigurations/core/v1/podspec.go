@@ -304,6 +304,15 @@ type PodSpecApplyConfiguration struct {
 	// Omission leaves NUMA placement to the kubelet's ordinary policies.
 	// This field is immutable.
 	NUMANode *int32 `json:"numaNode,omitempty"`
+	// cpuNUMA is the required CPU NUMA node. Zero selects node 0; omission
+	// leaves CPU placement automatic. Requires Linux and independent-numa
+	// with pod scope, and cannot be combined with numaNode. This field is immutable.
+	CPUNUMA *int32 `json:"cpuNUMA,omitempty"`
+	// memNUMA is the required memory NUMA node, which may have no CPUs.
+	// Zero selects node 0; omission leaves memory placement automatic.
+	// Requires Linux and independent-numa with pod scope, and cannot be
+	// combined with numaNode. This field is immutable.
+	MemNUMA *int32 `json:"memNUMA,omitempty"`
 }
 
 // PodSpecApplyConfiguration constructs a declarative configuration of the PodSpec type for use with
@@ -727,5 +736,21 @@ func (b *PodSpecApplyConfiguration) WithEvictionResponders(values ...*EvictionRe
 // If called multiple times, the NUMANode field is set to the value of the last call.
 func (b *PodSpecApplyConfiguration) WithNUMANode(value int32) *PodSpecApplyConfiguration {
 	b.NUMANode = &value
+	return b
+}
+
+// WithCPUNUMA sets the CPUNUMA field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the CPUNUMA field is set to the value of the last call.
+func (b *PodSpecApplyConfiguration) WithCPUNUMA(value int32) *PodSpecApplyConfiguration {
+	b.CPUNUMA = &value
+	return b
+}
+
+// WithMemNUMA sets the MemNUMA field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the MemNUMA field is set to the value of the last call.
+func (b *PodSpecApplyConfiguration) WithMemNUMA(value int32) *PodSpecApplyConfiguration {
+	b.MemNUMA = &value
 	return b
 }

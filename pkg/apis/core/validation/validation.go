@@ -4788,7 +4788,7 @@ func validateHostIPs(pod, oldPod *core.Pod) field.ErrorList {
 // and should be left empty unless the spec is from a real pod object.
 func ValidatePodSpec(spec *core.PodSpec, podMeta *metav1.ObjectMeta, fldPath *field.Path, opts PodValidationOptions) field.ErrorList {
 	allErrs := field.ErrorList{}
-	allErrs = append(allErrs, validatePodNUMANode(spec, fldPath)...)
+	allErrs = append(allErrs, validatePodNUMAPlacement(spec, fldPath)...)
 
 	if spec.TerminationGracePeriodSeconds == nil {
 		allErrs = append(allErrs, field.Required(fldPath.Child("terminationGracePeriodSeconds"), ""))
@@ -4908,16 +4908,21 @@ func ValidatePodSpec(spec *core.PodSpec, podMeta *metav1.ObjectMeta, fldPath *fi
 	return allErrs
 }
 
-func validatePodNUMANode(spec *core.PodSpec, fldPath *field.Path) field.ErrorList {
-	if spec.NUMANode == nil {
+func validatePodNUMAPlacement(spec *core.PodSpec, fldPath *field.Path) field.ErrorList {
+	if !hasPodNUMAPlacement(spec) {
 		return nil
 	}
 	var allErrs field.ErrorList
-	if *spec.NUMANode < 0 || *spec.NUMANode > 63 {
-		allErrs = append(allErrs, field.Invalid(fldPath.Child("numaNode"), *spec.NUMANode, "must be between 0 and 63"))
+	for name, id := range map[string]*int32{"numaNode": spec.NUMANode, "cpuNUMA": spec.CPUNUMA, "memNUMA": spec.MemNUMA} {
+		if id != nil && (*id < 0 || *id > 63) {
+			allErrs = append(allErrs, field.Invalid(fldPath.Child(name), *id, "must be between 0 and 63"))
+		}
+	}
+	if spec.NUMANode != nil && (spec.CPUNUMA != nil || spec.MemNUMA != nil) {
+		allErrs = append(allErrs, field.Forbidden(fldPath.Child("numaNode"), "numaNode cannot be combined with cpuNUMA or memNUMA"))
 	}
 	if spec.Resources != nil {
-		allErrs = append(allErrs, field.Forbidden(fldPath.Child("resources"), "pod-level resources are not supported with numaNode"))
+		allErrs = append(allErrs, field.Forbidden(fldPath.Child("resources"), "pod-level resources are not supported with NUMA placement"))
 	}
 	for i := range spec.Containers {
 		allErrs = append(allErrs, validateNUMAContainerResources(&spec.Containers[i], fldPath.Child("containers").Index(i))...)
@@ -4934,10 +4939,11 @@ func validateNUMAContainerResources(container *core.Container, fldPath *field.Pa
 		request, hasRequest := container.Resources.Requests[name]
 		limit, hasLimit := container.Resources.Limits[name]
 		if !hasRequest || !hasLimit || request.Cmp(limit) != 0 {
-			allErrs = append(allErrs, field.Invalid(fldPath.Child("resources"), container.Resources, fmt.Sprintf("%s request and limit must be present and equal for numaNode", name)))
+			allErrs = append(allErrs, field.Invalid(fldPath.Child("resources"), container.Resources, fmt.Sprintf("%s request and limit must be present and equal for NUMA placement", name)))
 		}
-		if name == core.ResourceCPU && hasRequest && (request.MilliValue() <= 0 || request.MilliValue()%1000 != 0) {
-			allErrs = append(allErrs, field.Invalid(fldPath.Child("resources", "requests").Key(string(name)), request.String(), "CPU request must be a positive whole number for numaNode"))
+		_, isWhole := request.AsScale(0)
+		if name == core.ResourceCPU && hasRequest && (!isWhole || request.Sign() <= 0) {
+			allErrs = append(allErrs, field.Invalid(fldPath.Child("resources", "requests").Key(string(name)), request.String(), "CPU request must be a positive whole number for NUMA placement"))
 		}
 	}
 	return allErrs
@@ -4961,11 +4967,25 @@ func numaPodResourcesChanged(newPod, oldPod *core.Pod) bool {
 	return changed(newPod.Spec.Containers, oldPod.Spec.Containers) || changed(newPod.Spec.InitContainers, oldPod.Spec.InitContainers)
 }
 
-func validateImmutableNUMANode(newPod, oldPod *core.Pod) field.ErrorList {
-	if apiequality.Semantic.DeepEqual(newPod.Spec.NUMANode, oldPod.Spec.NUMANode) {
-		return nil
+func hasPodNUMAPlacement(spec *core.PodSpec) bool {
+	return spec.NUMANode != nil || spec.CPUNUMA != nil || spec.MemNUMA != nil
+}
+
+func validateImmutableNUMAPlacement(newPod, oldPod *core.Pod) field.ErrorList {
+	var allErrs field.ErrorList
+	for _, target := range []struct {
+		name     string
+		old, new *int32
+	}{
+		{"numaNode", oldPod.Spec.NUMANode, newPod.Spec.NUMANode},
+		{"cpuNUMA", oldPod.Spec.CPUNUMA, newPod.Spec.CPUNUMA},
+		{"memNUMA", oldPod.Spec.MemNUMA, newPod.Spec.MemNUMA},
+	} {
+		if !apiequality.Semantic.DeepEqual(target.old, target.new) {
+			allErrs = append(allErrs, field.Forbidden(field.NewPath("spec", target.name), target.name+" is immutable; replace the Pod to change it"))
+		}
 	}
-	return field.ErrorList{field.Forbidden(field.NewPath("spec", "numaNode"), "numaNode is immutable; replace the Pod to change it")}
+	return allErrs
 }
 
 func validatePodResources(spec *core.PodSpec, podClaimNames sets.Set[string], fldPath *field.Path, opts PodValidationOptions) field.ErrorList {
@@ -5093,8 +5113,10 @@ func validateLinux(spec *core.PodSpec, fldPath *field.Path) field.ErrorList {
 
 func validateWindows(spec *core.PodSpec, fldPath *field.Path) field.ErrorList {
 	allErrs := field.ErrorList{}
-	if spec.NUMANode != nil {
-		allErrs = append(allErrs, field.Forbidden(fldPath.Child("numaNode"), "numaNode requires a Linux Pod"))
+	for name, id := range map[string]*int32{"numaNode": spec.NUMANode, "cpuNUMA": spec.CPUNUMA, "memNUMA": spec.MemNUMA} {
+		if id != nil {
+			allErrs = append(allErrs, field.Forbidden(fldPath.Child(name), name+" requires a Linux Pod"))
+		}
 	}
 	securityContext := spec.SecurityContext
 	// validate Pod SecurityContext
@@ -5939,7 +5961,7 @@ var updatablePodSpecFields = []string{
 func ValidatePodUpdate(newPod, oldPod *core.Pod, opts PodValidationOptions) field.ErrorList {
 	fldPath := field.NewPath("metadata")
 	allErrs := ValidateObjectMetaUpdate(&newPod.ObjectMeta, &oldPod.ObjectMeta, fldPath)
-	allErrs = append(allErrs, validateImmutableNUMANode(newPod, oldPod)...)
+	allErrs = append(allErrs, validateImmutableNUMAPlacement(newPod, oldPod)...)
 	allErrs = append(allErrs, validatePodMetadataAndSpec(newPod, opts)...)
 	allErrs = append(allErrs, ValidatePodSpecificAnnotationUpdates(newPod, oldPod, fldPath.Child("annotations"), opts)...)
 	specPath := field.NewPath("spec")
@@ -6252,7 +6274,7 @@ func ValidateEphemeralContainerStateTransition(newStatuses, oldStatuses []core.C
 func ValidatePodStatusUpdate(newPod, oldPod *core.Pod, opts PodValidationOptions) field.ErrorList {
 	fldPath := field.NewPath("metadata")
 	allErrs := ValidateObjectMetaUpdate(&newPod.ObjectMeta, &oldPod.ObjectMeta, fldPath)
-	allErrs = append(allErrs, validateImmutableNUMANode(newPod, oldPod)...)
+	allErrs = append(allErrs, validateImmutableNUMAPlacement(newPod, oldPod)...)
 	allErrs = append(allErrs, ValidatePodSpecificAnnotationUpdates(newPod, oldPod, fldPath.Child("annotations"), opts)...)
 
 	fldPath = field.NewPath("status")
@@ -6550,11 +6572,11 @@ func ValidatePodEphemeralContainersUpdate(newPod, oldPod *core.Pod, opts PodVali
 	// Part 1: Validate newPod's spec and updates to metadata
 	fldPath := field.NewPath("metadata")
 	allErrs := ValidateObjectMetaUpdate(&newPod.ObjectMeta, &oldPod.ObjectMeta, fldPath)
-	allErrs = append(allErrs, validateImmutableNUMANode(newPod, oldPod)...)
+	allErrs = append(allErrs, validateImmutableNUMAPlacement(newPod, oldPod)...)
 	allErrs = append(allErrs, validatePodMetadataAndSpec(newPod, opts)...)
 	allErrs = append(allErrs, ValidatePodSpecificAnnotationUpdates(newPod, oldPod, fldPath.Child("annotations"), opts)...)
-	if oldPod.Spec.NUMANode != nil && len(newPod.Spec.EphemeralContainers) > len(oldPod.Spec.EphemeralContainers) {
-		allErrs = append(allErrs, field.Forbidden(field.NewPath("spec", "ephemeralContainers"), "ephemeral containers are not supported with numaNode"))
+	if hasPodNUMAPlacement(&oldPod.Spec) && len(newPod.Spec.EphemeralContainers) > len(oldPod.Spec.EphemeralContainers) {
+		allErrs = append(allErrs, field.Forbidden(field.NewPath("spec", "ephemeralContainers"), "ephemeral containers are not supported with NUMA placement"))
 	}
 
 	// static pods don't support ephemeral containers #113935
@@ -6590,10 +6612,10 @@ func ValidatePodResize(newPod, oldPod *core.Pod, opts PodValidationOptions) fiel
 	// Part 1: Validate newPod's spec and updates to metadata
 	fldPath := field.NewPath("metadata")
 	allErrs := ValidateObjectMetaUpdate(&newPod.ObjectMeta, &oldPod.ObjectMeta, fldPath)
-	allErrs = append(allErrs, validateImmutableNUMANode(newPod, oldPod)...)
+	allErrs = append(allErrs, validateImmutableNUMAPlacement(newPod, oldPod)...)
 	allErrs = append(allErrs, validatePodMetadataAndSpec(newPod, opts)...)
-	if oldPod.Spec.NUMANode != nil && numaPodResourcesChanged(newPod, oldPod) {
-		allErrs = append(allErrs, field.Forbidden(field.NewPath("spec"), "CPU or memory resize is not supported with numaNode; replace the Pod"))
+	if hasPodNUMAPlacement(&oldPod.Spec) && numaPodResourcesChanged(newPod, oldPod) {
+		allErrs = append(allErrs, field.Forbidden(field.NewPath("spec"), "CPU or memory resize is not supported with NUMA placement; replace the Pod"))
 	}
 
 	// static pods cannot be resized.

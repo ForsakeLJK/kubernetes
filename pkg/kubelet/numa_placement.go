@@ -38,16 +38,25 @@ func newNUMAPlacementAdmitHandler(config cm.NodeConfig, getMachineInfo func() (*
 }
 
 func (h *numaPlacementAdmitHandler) Admit(_ context.Context, attrs *lifecycle.PodAdmitAttributes) lifecycle.PodAdmitResult {
-	if attrs.Pod.Spec.NUMANode == nil {
+	placement := topologymanager.ResolveNUMAPlacement(attrs.Pod)
+	if !placement.Required {
 		return lifecycle.PodAdmitResult{Admit: true}
 	}
-	id := *attrs.Pod.Spec.NUMANode
+	if err := topologymanager.ValidateIndependentNUMARequest(attrs.Pod); err != nil {
+		return lifecycle.PodAdmitResult{Reason: "NUMAPlacementUnsupported", Message: err.Error()}
+	}
+	id := placement.CPU
 	policySupported := h.config.TopologyManagerPolicy == topologymanager.PolicySingleNumaNode || h.config.TopologyManagerPolicy == topologymanager.PolicyIndependentNUMA
+	policyNames := "single-numa-node or independent-numa"
+	if placement.Independent {
+		policySupported = h.config.TopologyManagerPolicy == topologymanager.PolicyIndependentNUMA
+		policyNames = "independent-numa"
+	}
 	if h.goos != "linux" || h.config.CPUManagerPolicy != "static" || h.config.MemoryManagerPolicy != "Static" ||
 		!policySupported || h.config.TopologyManagerScope != "pod" {
 		return lifecycle.PodAdmitResult{
 			Reason:  "NUMAPlacementUnsupported",
-			Message: fmt.Sprintf("NUMA node %d requires Linux, CPU Manager static, Memory Manager Static, and Topology Manager single-numa-node or independent-numa with pod scope", id),
+			Message: fmt.Sprintf("NUMA node %d requires Linux, CPU Manager static, Memory Manager Static, and Topology Manager %s with pod scope", id, policyNames),
 		}
 	}
 	info, err := h.getMachineInfo()
@@ -63,13 +72,25 @@ func (h *numaPlacementAdmitHandler) Admit(_ context.Context, attrs *lifecycle.Po
 			Message: fmt.Sprintf("cannot verify NUMA node %d: local machine topology information is unavailable", id),
 		}
 	}
-	for _, node := range info.Topology {
-		if node.Id == int(id) {
-			return lifecycle.PodAdmitResult{Admit: true}
+	for _, target := range []struct {
+		resource string
+		id       int
+	}{{"CPU", placement.CPU}, {"memory", placement.Memory}} {
+		found, hasCPUs := false, false
+		for _, node := range info.Topology {
+			if node.Id == target.id {
+				found = true
+				for _, core := range node.Cores {
+					hasCPUs = hasCPUs || len(core.Threads) > 0
+				}
+			}
+		}
+		if !found {
+			return lifecycle.PodAdmitResult{Reason: "NUMANodeNotFound", Message: fmt.Sprintf("%s NUMA node %d is absent from the local machine topology", target.resource, target.id)}
+		}
+		if placement.Independent && target.resource == "CPU" && !hasCPUs {
+			return lifecycle.PodAdmitResult{Reason: "NUMAPlacementFailed", Message: fmt.Sprintf("CPU NUMA node %d contains no eligible CPUs", target.id)}
 		}
 	}
-	return lifecycle.PodAdmitResult{
-		Reason:  "NUMANodeNotFound",
-		Message: fmt.Sprintf("NUMA node %d is absent from the local machine topology", id),
-	}
+	return lifecycle.PodAdmitResult{Admit: true}
 }

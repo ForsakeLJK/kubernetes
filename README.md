@@ -287,7 +287,7 @@ defaults remain `none` and `container`. The new policy rejects container scope
 and the CPU Manager option `align-by-socket`. Existing topology node-count limits
 and supported policy options still apply.
 
-The current policy supports ordinary Pods and the legacy combined placement
+The policy supports ordinary Pods and the legacy combined placement
 requirement `spec.numaNode`. Ordinary Pods use the existing `single-numa-node`
 hint-merging behavior, including their existing eligibility rules. Legacy Pods
 require both static managers and the resource declarations above, and retain
@@ -295,12 +295,27 @@ the same exact CPU/memory target, refusal, rollback, and recovery guarantees
 under either policy. For example, `numaNode: 2` always requires both resources
 on node 2 under `independent-numa`.
 
-Independent placement means selecting separate singleton targets for CPUs and
-memory. The policy name prepares that extension; the `cpuNUMA` and `memNUMA` API
-fields and split placement are scheduled for subsequent tickets. Current
-common-node outcomes are counted as aligned only when the allocated CPU and
-memory masks identify the same single node. The new policy does not
-globally promise common-node alignment.
+For one application container, set both `spec.cpuNUMA` and `spec.memNUMA` to
+require separate CPU and memory targets. For example, `cpuNUMA: 0` with
+`memNUMA: 3` allocates CPUs on node 0 and confines ordinary memory to node 3,
+which may have no CPUs. Equal targets are also supported. Each ID is from 0
+through 63 and is immutable; `numaNode` cannot be combined with either field.
+Both static managers, Guaranteed equal CPU/memory requests and limits, and
+positive whole CPUs are required. A shortage on a target refuses admission
+even if another node has capacity. Allocation failures roll back new resources;
+restarts reuse matching assignments and refuse conflicting checkpoints.
+
+Partial requests, multiple application containers, init/sidecar containers,
+and hugepages are refused with unsupported-slice diagnostics pending their
+follow-up tickets. Pod budgets, resize, and ephemeral containers are excluded.
+Ordinary and legacy Pods retain their existing behavior.
+
+Successful split admissions increment
+`kubelet_topology_manager_split_numa_admissions_total`. Common-node alignment
+is counted only when concrete CPU and memory allocations share one node.
+The policy does not globally promise common-node alignment. Synthetic tests
+verify allocation, recovery, and runtime masks; Linux runtime evidence remains
+a separate operator validation step.
 
 ## How the kubelet enforces it
 

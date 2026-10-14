@@ -1468,6 +1468,8 @@ func Validate_PodSpec(
 	}
 
 	// field corev1.PodSpec.NUMANode has no validation
+	// field corev1.PodSpec.CPUNUMA has no validation
+	// field corev1.PodSpec.MemNUMA has no validation
 	return errs
 }
 

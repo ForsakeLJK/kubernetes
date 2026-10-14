@@ -121,3 +121,55 @@ func TestNUMAPlacementAdmitsHugepageWorkloads(t *testing.T) {
 		})
 	}
 }
+
+func TestIndependentNUMAPlacementAdmission(t *testing.T) {
+	config := cm.NodeConfig{CPUManagerPolicy: "static", MemoryManagerPolicy: "Static", TopologyManagerPolicy: "independent-numa", TopologyManagerScope: "pod"}
+	resources := v1.ResourceList{v1.ResourceCPU: resource.MustParse("1"), v1.ResourceMemory: resource.MustParse("1Gi")}
+	for _, tc := range []struct {
+		name string
+		edit func(*v1.Pod, *cm.NodeConfig)
+		want string
+	}{
+		{name: "CPU-less memory target"},
+		{name: "equal targets", edit: func(p *v1.Pod, _ *cm.NodeConfig) { p.Spec.MemNUMA = numaTestID(0) }},
+		{name: "whole CPU in millicores", edit: func(p *v1.Pod, _ *cm.NodeConfig) {
+			p.Spec.Containers[0].Resources.Requests[v1.ResourceCPU] = resource.MustParse("1000m")
+			p.Spec.Containers[0].Resources.Limits[v1.ResourceCPU] = resource.MustParse("1.0")
+		}},
+		{name: "CPU just below a whole number", edit: func(p *v1.Pod, _ *cm.NodeConfig) {
+			p.Spec.Containers[0].Resources.Requests[v1.ResourceCPU] = resource.MustParse("0.9999")
+			p.Spec.Containers[0].Resources.Limits[v1.ResourceCPU] = resource.MustParse("0.9999")
+		}, want: "whole number"},
+		{name: "sparse memory hole", edit: func(p *v1.Pod, _ *cm.NodeConfig) { p.Spec.MemNUMA = numaTestID(1) }, want: "NUMANodeNotFound"},
+		{name: "CPU-less CPU target", edit: func(p *v1.Pod, _ *cm.NodeConfig) { p.Spec.CPUNUMA = numaTestID(3) }, want: "eligible CPUs"},
+		{name: "legacy policy", edit: func(_ *v1.Pod, c *cm.NodeConfig) { c.TopologyManagerPolicy = "single-numa-node" }, want: "independent-numa"},
+		{name: "CPU partial", edit: func(p *v1.Pod, _ *cm.NodeConfig) { p.Spec.MemNUMA = nil }, want: "partial requests"},
+		{name: "memory partial", edit: func(p *v1.Pod, _ *cm.NodeConfig) { p.Spec.CPUNUMA = nil }, want: "partial requests"},
+		{name: "mixed fields", edit: func(p *v1.Pod, _ *cm.NodeConfig) { p.Spec.NUMANode = numaTestID(0) }, want: "cannot be combined"},
+		{name: "multiple applications", edit: func(p *v1.Pod, _ *cm.NodeConfig) { p.Spec.Containers = append(p.Spec.Containers, p.Spec.Containers[0]) }, want: "exactly one"},
+		{name: "init", edit: func(p *v1.Pod, _ *cm.NodeConfig) { p.Spec.InitContainers = []v1.Container{p.Spec.Containers[0]} }, want: "init or sidecar"},
+		{name: "hugepages", edit: func(p *v1.Pod, _ *cm.NodeConfig) {
+			p.Spec.Containers[0].Resources.Requests[v1.ResourceName("hugepages-2Mi")] = resource.MustParse("2Mi")
+		}, want: "hugepage requests"},
+		{name: "fractional CPUs", edit: func(p *v1.Pod, _ *cm.NodeConfig) {
+			p.Spec.Containers[0].Resources.Requests[v1.ResourceCPU] = resource.MustParse("500m")
+			p.Spec.Containers[0].Resources.Limits[v1.ResourceCPU] = resource.MustParse("500m")
+		}, want: "whole number"},
+		{name: "pod budget", edit: func(p *v1.Pod, _ *cm.NodeConfig) { p.Spec.Resources = &v1.ResourceRequirements{} }, want: "pod-level resources"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pod := &v1.Pod{Spec: v1.PodSpec{CPUNUMA: numaTestID(0), MemNUMA: numaTestID(3), Containers: []v1.Container{{Name: "app", Resources: v1.ResourceRequirements{Requests: resources.DeepCopy(), Limits: resources.DeepCopy()}}}}}
+			configuration := config
+			if tc.edit != nil {
+				tc.edit(pod, &configuration)
+			}
+			h := &numaPlacementAdmitHandler{goos: "linux", config: configuration, getMachineInfo: func() (*cadvisorapi.MachineInfo, error) {
+				return &cadvisorapi.MachineInfo{Topology: []cadvisorapi.Node{{Id: 0, Cores: []cadvisorapi.Core{{Threads: []int{0, 1}}}}, {Id: 3}}}, nil
+			}}
+			result := h.Admit(context.Background(), &lifecycle.PodAdmitAttributes{Pod: pod})
+			if tc.want == "" && !result.Admit || tc.want != "" && (result.Admit || !strings.Contains(result.Reason+" "+result.Message, tc.want)) {
+				t.Fatalf("admission = %+v, want %q", result, tc.want)
+			}
+		})
+	}
+}

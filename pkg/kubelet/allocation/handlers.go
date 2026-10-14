@@ -30,6 +30,7 @@ import (
 	"k8s.io/kubernetes/pkg/kubelet/cm"
 	"k8s.io/kubernetes/pkg/kubelet/cm/cpumanager"
 	"k8s.io/kubernetes/pkg/kubelet/cm/memorymanager"
+	"k8s.io/kubernetes/pkg/kubelet/cm/topologymanager"
 	kubecontainer "k8s.io/kubernetes/pkg/kubelet/container"
 	"k8s.io/kubernetes/pkg/kubelet/lifecycle"
 	"k8s.io/kubernetes/pkg/kubelet/metrics"
@@ -56,6 +57,9 @@ type podResizesAdmitHandler struct {
 func (h *podResizesAdmitHandler) Admit(ctx context.Context, attrs *lifecycle.PodAdmitAttributes) lifecycle.PodAdmitResult {
 	if attrs.Operation != lifecycle.ResizeOperation {
 		return lifecycle.PodAdmitResult{Admit: true}
+	}
+	if topologymanager.ResolveNUMAPlacement(attrs.Pod).Required {
+		return lifecycle.PodAdmitResult{Reason: v1.PodReasonInfeasible, Message: "CPU or memory resize is not supported with NUMA placement; replace the Pod"}
 	}
 
 	logger := klog.FromContext(ctx)

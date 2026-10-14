@@ -146,9 +146,10 @@ const (
 	MemoryManagerPinningErrorsTotalKey   = "memory_manager_pinning_errors_total"
 
 	// Metrics to track the Topology manager behavior
-	TopologyManagerAdmissionRequestsTotalKey = "topology_manager_admission_requests_total"
-	TopologyManagerAdmissionErrorsTotalKey   = "topology_manager_admission_errors_total"
-	TopologyManagerAdmissionDurationKey      = "topology_manager_admission_duration_ms"
+	TopologyManagerAdmissionRequestsTotalKey   = "topology_manager_admission_requests_total"
+	TopologyManagerAdmissionErrorsTotalKey     = "topology_manager_admission_errors_total"
+	TopologyManagerAdmissionDurationKey        = "topology_manager_admission_duration_ms"
+	TopologyManagerSplitNUMAAdmissionsTotalKey = "topology_manager_split_numa_admissions_total"
 
 	// Metrics to track orphan pod cleanup
 	orphanPodCleanedVolumesKey       = "orphan_pod_cleaned_volumes"
@@ -1030,7 +1031,18 @@ var (
 		},
 	)
 
-	// TopologyManagerAdmissionDuration is a Histogram that tracks the duration (in milliseconds) to serve a pod admission request.
+	// TopologyManagerSplitNUMAAdmissionsTotal counts successful admissions whose
+	// CPU and memory targets differ, without implying common-node alignment.
+	TopologyManagerSplitNUMAAdmissionsTotal = metrics.NewCounter(
+		&metrics.CounterOpts{
+			Subsystem:      KubeletSubsystem,
+			Name:           TopologyManagerSplitNUMAAdmissionsTotalKey,
+			Help:           "The number of successful independent NUMA admissions with different CPU and memory nodes.",
+			StabilityLevel: metrics.ALPHA,
+		},
+	)
+
+	// TopologyManagerAdmissionDuration tracks time spent serving a pod admission request.
 	TopologyManagerAdmissionDuration = metrics.NewHistogram(
 		&metrics.HistogramOpts{
 			Subsystem:      KubeletSubsystem,
@@ -1525,6 +1537,7 @@ func Register() {
 		}
 		legacyregistry.MustRegister(TopologyManagerAdmissionRequestsTotal)
 		legacyregistry.MustRegister(TopologyManagerAdmissionErrorsTotal)
+		legacyregistry.MustRegister(TopologyManagerSplitNUMAAdmissionsTotal)
 		legacyregistry.MustRegister(TopologyManagerAdmissionDuration)
 		legacyregistry.MustRegister(OrphanPodCleanedVolumes)
 		legacyregistry.MustRegister(OrphanPodCleanedVolumesErrors)

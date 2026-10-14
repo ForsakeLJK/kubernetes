@@ -4809,6 +4809,16 @@ func (in *PodSpec) DeepCopyInto(out *PodSpec) {
 		*out = new(int32)
 		**out = **in
 	}
+	if in.CPUNUMA != nil {
+		in, out := &in.CPUNUMA, &out.CPUNUMA
+		*out = new(int32)
+		**out = **in
+	}
+	if in.MemNUMA != nil {
+		in, out := &in.MemNUMA, &out.MemNUMA
+		*out = new(int32)
+		**out = **in
+	}
 	return
 }
 

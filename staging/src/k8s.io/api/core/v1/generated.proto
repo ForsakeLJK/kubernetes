@@ -4978,6 +4978,8 @@ message PodSpec {
   // - spec.hostUsers
   // - spec.resources
   // - spec.numaNode
+  // - spec.cpuNUMA
+  // - spec.memNUMA
   // - spec.securityContext.appArmorProfile
   // - spec.securityContext.seLinuxOptions
   // - spec.securityContext.seccompProfile
@@ -5118,6 +5120,19 @@ message PodSpec {
   // This field is immutable.
   // +optional
   optional int32 numaNode = 45;
+
+  // cpuNUMA is the required CPU NUMA node. Zero selects node 0; omission
+  // leaves CPU placement automatic. Requires Linux and independent-numa
+  // with pod scope, and cannot be combined with numaNode. This field is immutable.
+  // +optional
+  optional int32 cpuNUMA = 46;
+
+  // memNUMA is the required memory NUMA node, which may have no CPUs.
+  // Zero selects node 0; omission leaves memory placement automatic.
+  // Requires Linux and independent-numa with pod scope, and cannot be
+  // combined with numaNode. This field is immutable.
+  // +optional
+  optional int32 memNUMA = 47;
 }
 
 // PodStatus represents information about the status of a pod. Status may trail the actual

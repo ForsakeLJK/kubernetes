@@ -31,6 +31,9 @@ import (
 )
 
 func (i *internalContainerLifecycleImpl) PreCreateContainer(logger klog.Logger, pod *v1.Pod, container *v1.Container, containerConfig *runtimeapi.ContainerConfig) error {
+	if err := topologymanager.ValidateIndependentNUMARequest(pod); err != nil {
+		return err
+	}
 	placement := topologymanager.ResolveNUMAPlacement(pod)
 	if placement.Required {
 		if i.cpuManager == nil || i.memoryManager == nil {

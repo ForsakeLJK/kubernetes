@@ -1888,7 +1888,9 @@
           "priority": 2
         }
       ],
-      "numaNode": 45
+      "numaNode": 45,
+      "cpuNUMA": 46,
+      "memNUMA": 47
     }
   }
 }

@@ -4090,6 +4090,8 @@ type PodSpec struct {
 	// - spec.hostUsers
 	// - spec.resources
 	// - spec.numaNode
+	// - spec.cpuNUMA
+	// - spec.memNUMA
 	// - spec.securityContext.appArmorProfile
 	// - spec.securityContext.seLinuxOptions
 	// - spec.securityContext.seccompProfile
@@ -4209,6 +4211,14 @@ type PodSpec struct {
 	// Nil means that the pod has no explicit NUMA placement requirement.
 	// +optional
 	NUMANode *int32
+
+	// CPUNUMA is the required CPU NUMA node; nil leaves CPU placement automatic.
+	// +optional
+	CPUNUMA *int32
+
+	// MemNUMA is the required memory NUMA node; nil leaves memory placement automatic.
+	// +optional
+	MemNUMA *int32
 }
 
 // PodResourceClaim references exactly one ResourceClaim through a ClaimSource.

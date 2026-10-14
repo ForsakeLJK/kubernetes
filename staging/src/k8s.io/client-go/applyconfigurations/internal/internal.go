@@ -7200,6 +7200,9 @@ var schemaYAML = typed.YAMLObject(`types:
           elementRelationship: associative
           keys:
           - name
+    - name: cpuNUMA
+      type:
+        scalar: numeric
     - name: dnsConfig
       type:
         namedType: io.k8s.api.core.v1.PodDNSConfig
@@ -7267,6 +7270,9 @@ var schemaYAML = typed.YAMLObject(`types:
           elementRelationship: associative
           keys:
           - name
+    - name: memNUMA
+      type:
+        scalar: numeric
     - name: nodeName
       type:
         scalar: string

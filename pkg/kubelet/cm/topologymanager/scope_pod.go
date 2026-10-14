@@ -54,6 +54,14 @@ func NewPodScope(policy Policy) Scope {
 }
 
 func (s *podScope) Admit(ctx context.Context, pod *v1.Pod, operation lifecycle.Operation) lifecycle.PodAdmitResult {
+	if placement := ResolveNUMAPlacement(pod); placement.Independent {
+		if s.policy.Name() != PolicyIndependentNUMA {
+			return admission.GetPodAdmitResult(numaPlacementError{"cpuNUMA and memNUMA require independent-numa with pod scope"})
+		}
+		if err := ValidateIndependentNUMARequest(pod); err != nil {
+			return admission.GetPodAdmitResult(numaPlacementError{err.Error()})
+		}
+	}
 	// If the PodLevelResourceManagers feature is enabled, delegate the resource
 	// allocation to the hint providers (CPU and Memory managers) via the AllocatePod call.
 	// This is a one-time allocation for the entire pod.
@@ -104,7 +112,7 @@ func (s *podScope) admitUsingContainerResources(ctx context.Context, pod *v1.Pod
 
 	var acquired []func() error
 	for _, container := range append(pod.Spec.InitContainers, pod.Spec.Containers...) {
-		logger.Info("Topology Affinity", "bestHint", bestHint, "pod", klog.KObj(pod), "containerName", container.Name)
+		logger.Info("Topology Affinity", "bestHint", bestHint, "memoryHint", memoryHint, "pod", klog.KObj(pod), "containerName", container.Name)
 		if placement.Required {
 			acquired = append(acquired, s.snapshotTopologyHints(string(pod.UID), container.Name))
 		}
@@ -160,6 +168,12 @@ func (s *podScope) requestedAffinity(logger klog.Logger, pod *v1.Pod, placement 
 			restored = checker.HasRestoredNUMAPlacement(pod)
 		}
 		for name, hints := range resources {
+			if hints == nil && name != string(v1.ResourceCPU) && name != string(v1.ResourceMemory) && !corehelper.IsHugePageResourceName(v1.ResourceName(name)) {
+				// A nil device hint list means no topology preference; an empty
+				// list means no feasible allocation. Preserve that distinction.
+				filteredResources[name] = nil
+				continue
+			}
 			resourceID := placement.CPU
 			if name == string(v1.ResourceMemory) || corehelper.IsHugePageResourceName(v1.ResourceName(name)) {
 				resourceID = placement.Memory
@@ -196,7 +210,11 @@ func (s *podScope) requestedAffinity(logger klog.Logger, pod *v1.Pod, placement 
 				}
 				return TopologyHint{}, numaPlacementError{fmt.Sprintf("NUMA node %d has insufficient ordinary memory or incompatible memory topology", resourceID)}
 			}
-			filteredResources[name] = matching
+			// Memory feasibility is independent of CPU/device coordination. Its
+			// singleton must never participate in the shared affinity intersection.
+			if name != string(v1.ResourceMemory) && !corehelper.IsHugePageResourceName(v1.ResourceName(name)) {
+				filteredResources[name] = matching
+			}
 		}
 		providersHints[providerIndex] = filteredResources
 	}
@@ -229,7 +247,14 @@ func (s *podScope) allocateRequestedResources(ctx context.Context, pod *v1.Pod, 
 			}
 		}
 		if err := provider.Allocate(ctx, pod, container, operation); err != nil {
-			return acquired, numaPlacementError{fmt.Sprintf("NUMA node %d: %v", placement.CPU, err)}
+			return acquired, numaPlacementError{fmt.Sprintf("CPU NUMA node %d, memory NUMA node %d: %v", placement.CPU, placement.Memory, err)}
+		}
+		if validator, ok := provider.(interface {
+			ValidateNUMAPlacement(*v1.Pod, *v1.Container) error
+		}); ok {
+			if err := validator.ValidateNUMAPlacement(pod, container); err != nil {
+				return acquired, numaPlacementError{err.Error()}
+			}
 		}
 	}
 	return acquired, nil
@@ -284,6 +309,13 @@ func (s *podScope) checkAffinity(logger klog.Logger, pod *v1.Pod, operation life
 }
 
 func (s *podScope) updateSuccessMetrics(logger klog.Logger, pod *v1.Pod) {
+	placement := ResolveNUMAPlacement(pod)
+	if placement.Independent {
+		logger.Info("Independent NUMA placement admitted", "pod", klog.KObj(pod), "cpuNUMA", placement.CPU, "memNUMA", placement.Memory)
+		if placement.CPU != placement.Memory {
+			metrics.TopologyManagerSplitNUMAAdmissionsTotal.Inc()
+		}
+	}
 	if IsAlignmentGuaranteed(s.policy) || s.policy.Name() == PolicyIndependentNUMA && s.hasCommonNUMAPlacement(logger, pod) {
 		logger.V(4).Info("Resources aligned at pod scope", "pod", klog.KObj(pod))
 		metrics.ContainerAlignedComputeResources.WithLabelValues(metrics.AlignScopePod, metrics.AlignedNUMANode).Inc()

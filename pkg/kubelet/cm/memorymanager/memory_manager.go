@@ -285,12 +285,13 @@ func (m *manager) GetMemoryNUMANodes(logger klog.Logger, pod *v1.Pod, container 
 
 // Allocate is called to pre-allocate memory resources during Pod admission.
 func (m *manager) Allocate(ctx context.Context, pod *v1.Pod, container *v1.Container, operation lifecycle.Operation) error {
+	placement := topologymanager.ResolveNUMAPlacement(pod)
 	logger := klog.FromContext(ctx)
 	m.removeStaleState(logger)
 
 	m.Lock()
 	defer m.Unlock()
-	if pod.Spec.NUMANode != nil {
+	if placement.Required {
 		if err := m.checkNUMAPlacement(pod, container); err != nil {
 			return err
 		}
@@ -302,7 +303,7 @@ func (m *manager) Allocate(ctx context.Context, pod *v1.Pod, container *v1.Conta
 		logger.Error(err, "Allocate error", "pod", klog.KObj(pod), "containerName", container.Name)
 		return err
 	}
-	if pod.Spec.NUMANode != nil && !existed {
+	if placement.Required && !existed {
 		if m.numaPlacementAllocations == nil {
 			m.numaPlacementAllocations = make(map[string]bool)
 		}
@@ -322,33 +323,37 @@ func (m *manager) CheckNUMAPlacement(pod *v1.Pod, container *v1.Container) error
 }
 
 func (m *manager) checkNUMAPlacement(pod *v1.Pod, container *v1.Container) error {
+	placement := topologymanager.ResolveNUMAPlacement(pod)
+	if !placement.Required {
+		return nil
+	}
 	blocks := m.state.GetMemoryBlocks(string(pod.UID), container.Name)
 	if blocks == nil {
 		return nil
 	}
 	if len(blocks) == 0 {
-		return fmt.Errorf("memory assignment conflicts with requested NUMA node %d: no memory blocks", *pod.Spec.NUMANode)
+		return fmt.Errorf("memory assignment conflicts with requested NUMA node %d: no memory blocks", placement.Memory)
 	}
 	requested, err := getContainerRequestedResources(klog.Background(), pod, container)
 	if err != nil {
-		return fmt.Errorf("memory assignment for requested NUMA node %d: %w", *pod.Spec.NUMANode, err)
+		return fmt.Errorf("memory assignment for requested NUMA node %d: %w", placement.Memory, err)
 	}
 	seen := make(map[v1.ResourceName]bool, len(blocks))
 	for _, block := range blocks {
-		if len(block.NUMAAffinity) != 1 || block.NUMAAffinity[0] != int(*pod.Spec.NUMANode) {
-			return fmt.Errorf("%s assignment conflicts with requested NUMA node %d: assigned nodes %v", block.Type, *pod.Spec.NUMANode, block.NUMAAffinity)
+		if len(block.NUMAAffinity) != 1 || block.NUMAAffinity[0] != placement.Memory {
+			return fmt.Errorf("%s assignment conflicts with requested NUMA node %d: assigned nodes %v", block.Type, placement.Memory, block.NUMAAffinity)
 		}
 		if len(requested) > 0 {
 			amount, ok := requested[block.Type]
 			if !ok || seen[block.Type] || block.Size > amount || !isRegularInitContainer(pod, container) && block.Size != amount {
-				return fmt.Errorf("%s assignment conflicts with requested NUMA node %d: assigned %d bytes, requested %d", block.Type, *pod.Spec.NUMANode, block.Size, amount)
+				return fmt.Errorf("%s assignment conflicts with requested NUMA node %d: assigned %d bytes, requested %d", block.Type, placement.Memory, block.Size, amount)
 			}
 			seen[block.Type] = true
 		}
 	}
 	for resourceName := range requested {
 		if !seen[resourceName] {
-			return fmt.Errorf("%s assignment is missing for requested NUMA node %d", resourceName, *pod.Spec.NUMANode)
+			return fmt.Errorf("%s assignment is missing for requested NUMA node %d", resourceName, placement.Memory)
 		}
 	}
 	return nil
@@ -377,8 +382,8 @@ func (m *manager) SnapshotNUMAPlacement(pod *v1.Pod, _ *v1.Container) func(klog.
 	m.Lock()
 	defer m.Unlock()
 	podUID := string(pod.UID)
-	requestedNode := int(*pod.Spec.NUMANode)
 	assignments := m.state.GetMemoryAssignments()[podUID]
+	before, snapshotErr := numaPlacementMemoryTotals(assignments)
 	reusable := make(map[string]map[v1.ResourceName]uint64)
 	if policy, ok := m.policy.(*staticPolicy); ok {
 		for mask, resources := range policy.initContainersReusableMemory[podUID] {
@@ -398,33 +403,48 @@ func (m *manager) SnapshotNUMAPlacement(pod *v1.Pod, _ *v1.Container) func(klog.
 		defer m.Unlock()
 		currentAssignments := m.state.GetMemoryAssignments()
 		currentPodAssignments := currentAssignments[podUID]
-		memoryBefore, countBefore := numaPlacementMemoryTotals(assignments, requestedNode)
-		memoryAfter, countAfter := numaPlacementMemoryTotals(currentPodAssignments, requestedNode)
-		machineState := m.state.GetMachineState()
-		node := machineState[requestedNode]
-		if node == nil {
-			return fmt.Errorf("cannot restore NUMA node %d memory accounting: node is absent", requestedNode)
+		if snapshotErr != nil {
+			return snapshotErr
 		}
-		for resourceName, after := range memoryAfter {
-			before := memoryBefore[resourceName]
-			if after < before {
-				return fmt.Errorf("cannot restore NUMA node %d %s accounting: reservation decreased during admission", requestedNode, resourceName)
+		after, err := numaPlacementMemoryTotals(currentPodAssignments)
+		if err != nil {
+			return err
+		}
+		// Apply only this Pod's reservation changes to the current machine
+		// state. A global snapshot would erase intervening allocations.
+		machineState := m.state.GetMachineState()
+		for nodeID := range before {
+			if _, ok := after[nodeID]; !ok {
+				return fmt.Errorf("cannot restore NUMA node %d memory accounting: assignments disappeared during admission", nodeID)
 			}
-			if memory := node.MemoryMap[resourceName]; memory != nil {
-				freed := after - before
-				if memory.Reserved < freed {
-					return fmt.Errorf("cannot restore NUMA node %d %s accounting: reserved memory is too small", requestedNode, resourceName)
+		}
+		for nodeID, current := range after {
+			previous := before[nodeID]
+			node := machineState[nodeID]
+			if node == nil {
+				return fmt.Errorf("cannot restore NUMA node %d memory accounting: node is absent", nodeID)
+			}
+			for resourceName, size := range previous.memory {
+				if current.memory[resourceName] < size {
+					return fmt.Errorf("cannot restore NUMA node %d %s accounting: reservation decreased during admission", nodeID, resourceName)
+				}
+			}
+			for resourceName, size := range current.memory {
+				freed := size - previous.memory[resourceName]
+				memory := node.MemoryMap[resourceName]
+				if memory == nil || memory.Reserved < freed {
+					return fmt.Errorf("cannot restore NUMA node %d %s accounting: reserved memory is too small or resource is absent", nodeID, resourceName)
 				}
 				memory.Reserved -= freed
 				memory.Free += freed
 			}
-		}
-		if countAfter < countBefore || node.NumberOfAssignments < countAfter-countBefore {
-			return fmt.Errorf("cannot restore NUMA node %d memory assignment count", requestedNode)
-		}
-		node.NumberOfAssignments -= countAfter - countBefore
-		if node.NumberOfAssignments == 0 {
-			node.Cells = []int{requestedNode}
+			if current.assignments < previous.assignments || node.NumberOfAssignments < current.assignments-previous.assignments {
+				return fmt.Errorf("cannot restore NUMA node %d memory assignment count", nodeID)
+			}
+			node.NumberOfAssignments -= current.assignments - previous.assignments
+			if node.NumberOfAssignments == 0 {
+				node.Cells = []int{nodeID}
+			}
 		}
 		m.state.SetMachineState(machineState)
 		if len(assignments) == 0 {
@@ -451,26 +471,43 @@ func (m *manager) SnapshotNUMAPlacement(pod *v1.Pod, _ *v1.Container) func(klog.
 	}
 }
 
-func numaPlacementMemoryTotals(assignments map[string][]state.Block, requestedNode int) (map[v1.ResourceName]uint64, int) {
-	totals := make(map[v1.ResourceName]uint64)
-	count := 0
+// Placement reservations are single-node blocks, including zero-sized init
+// blocks whose memory has been reused but whose assignment still exists.
+type numaMemoryReservation struct {
+	memory      map[v1.ResourceName]uint64
+	assignments int
+}
+
+func numaPlacementMemoryTotals(assignments map[string][]state.Block) (map[int]numaMemoryReservation, error) {
+	totals := make(map[int]numaMemoryReservation)
 	for _, blocks := range assignments {
 		for _, block := range blocks {
-			if len(block.NUMAAffinity) == 1 && block.NUMAAffinity[0] == requestedNode {
-				totals[block.Type] += block.Size
-				count++
+			if len(block.NUMAAffinity) != 1 {
+				return nil, fmt.Errorf("cannot restore NUMA placement memory accounting: %s assignment spans nodes %v", block.Type, block.NUMAAffinity)
 			}
+			nodeID := block.NUMAAffinity[0]
+			total := totals[nodeID]
+			if total.memory == nil {
+				total.memory = make(map[v1.ResourceName]uint64)
+			}
+			total.memory[block.Type] += block.Size
+			total.assignments++
+			totals[nodeID] = total
 		}
 	}
-	return totals, count
+	return totals, nil
 }
 
 func (m *manager) ValidateNUMAPlacement(pod *v1.Pod, container *v1.Container) error {
+	placement := topologymanager.ResolveNUMAPlacement(pod)
+	if !placement.Required {
+		return nil
+	}
 	m.Lock()
 	defer m.Unlock()
 	blocks := m.state.GetMemoryBlocks(string(pod.UID), container.Name)
 	if len(blocks) == 0 {
-		return fmt.Errorf("memory allocation for requested NUMA node %d is missing", *pod.Spec.NUMANode)
+		return fmt.Errorf("memory allocation for requested NUMA node %d is missing", placement.Memory)
 	}
 	return m.checkNUMAPlacement(pod, container)
 }

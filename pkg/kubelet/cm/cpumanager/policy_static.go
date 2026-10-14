@@ -881,6 +881,7 @@ func (p *staticPolicy) Allocate(logger klog.Logger, s state.State, pod *v1.Pod, 
 }
 
 func (p *staticPolicy) allocateForAdd(logger klog.Logger, s state.State, pod *v1.Pod, container *v1.Container) (rerr error) {
+	placement := topologymanager.ResolveNUMAPlacement(pod)
 	numCPUs := p.guaranteedCPUs(logger, pod, container)
 	if numCPUs == 0 {
 		// container belongs in the shared pool (nothing to do; use default cpuset)
@@ -916,8 +917,8 @@ func (p *staticPolicy) allocateForAdd(logger klog.Logger, s state.State, pod *v1
 	// restarted with full-pcpus-only=true, checkpointed allocations that don't
 	// satisfy SMT alignment are accepted to avoid disrupting running workloads.
 	if cset, ok := s.GetCPUSet(string(pod.UID), container.Name); ok {
-		if pod.Spec.NUMANode != nil && !cset.IsSubsetOf(p.topology.CPUDetails.CPUsInNUMANodes(int(*pod.Spec.NUMANode))) {
-			return fmt.Errorf("CPU assignment for NUMA node %d contains CPUs outside the requested node", *pod.Spec.NUMANode)
+		if placement.Required && !cset.IsSubsetOf(p.topology.CPUDetails.CPUsInNUMANodes(placement.CPU)) {
+			return fmt.Errorf("CPU assignment for NUMA node %d contains CPUs outside the requested node", placement.CPU)
 		}
 		p.updateCPUsToReuse(pod, container, cset)
 		logger.Info("Static policy: container already present in state, skipping")
@@ -930,26 +931,26 @@ func (p *staticPolicy) allocateForAdd(logger klog.Logger, s state.State, pod *v1
 
 	// Call Topology Manager to get the aligned socket affinity across all hint providers.
 	hint := p.affinity.GetAffinity(logger, string(pod.UID), container.Name)
-	if pod.Spec.NUMANode != nil {
-		requested, err := bitmask.NewBitMask(int(*pod.Spec.NUMANode))
+	if placement.Required {
+		requested, err := bitmask.NewBitMask(placement.CPU)
 		if err != nil {
 			return err
 		}
 		if hint.NUMANodeAffinity == nil || !hint.NUMANodeAffinity.IsEqual(requested) {
-			return fmt.Errorf("CPU topology affinity does not select requested NUMA node %d", *pod.Spec.NUMANode)
+			return fmt.Errorf("CPU topology affinity does not select requested NUMA node %d", placement.CPU)
 		}
-		nodeCPUs := p.topology.CPUDetails.CPUsInNUMANodes(int(*pod.Spec.NUMANode))
+		nodeCPUs := p.topology.CPUDetails.CPUsInNUMANodes(placement.CPU)
 		reusable := p.cpusToReuse[string(pod.UID)].Intersection(nodeCPUs)
 		available := p.GetAvailableCPUs(s).Intersection(nodeCPUs).Union(reusable)
 		if available.Size() < numCPUs {
-			return fmt.Errorf("insufficient eligible CPUs on requested NUMA node %d: need %d, have %d", *pod.Spec.NUMANode, numCPUs, available.Size())
+			return fmt.Errorf("insufficient eligible CPUs on requested NUMA node %d: need %d, have %d", placement.CPU, numCPUs, available.Size())
 		}
 		allocation, err := p.takeByTopology(logger, reusable, numCPUs, 1)
 		if err != nil {
 			allocation, err = p.takeByTopology(logger, available, numCPUs, 1)
 		}
 		if err != nil {
-			return fmt.Errorf("cannot allocate %d CPUs on requested NUMA node %d: %w", numCPUs, *pod.Spec.NUMANode, err)
+			return fmt.Errorf("cannot allocate %d CPUs on requested NUMA node %d: %w", numCPUs, placement.CPU, err)
 		}
 		s.SetDefaultCPUSet(s.GetDefaultCPUSet().Difference(allocation))
 		s.SetCPUSet(string(pod.UID), container.Name, allocation)

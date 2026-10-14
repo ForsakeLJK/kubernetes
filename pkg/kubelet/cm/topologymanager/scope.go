@@ -59,7 +59,8 @@ type scope struct {
 	name  string
 	// Mapping of a Pods mapping of Containers and their TopologyHints
 	// Indexed by PodUID to ContainerName
-	podTopologyHints podTopologyHints
+	podTopologyHints    podTopologyHints
+	memoryTopologyHints podTopologyHints
 	// The list of components registered with the Manager
 	hintProviders []HintProvider
 	// Topology Manager Policy
@@ -90,6 +91,64 @@ func (s *scope) setTopologyHints(podUID string, containerName string, th Topolog
 
 func (s *scope) GetAffinity(_ klog.Logger, podUID string, containerName string) TopologyHint {
 	return s.getTopologyHints(podUID, containerName)
+}
+
+func (s *scope) GetMemoryAffinity(_ klog.Logger, podUID string, containerName string) TopologyHint {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	if hint, ok := s.memoryTopologyHints[podUID][containerName]; ok {
+		return hint
+	}
+	return s.podTopologyHints[podUID][containerName]
+}
+
+func (s *scope) setMemoryTopologyHints(podUID, containerName string, hint TopologyHint) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	if s.memoryTopologyHints == nil {
+		s.memoryTopologyHints = podTopologyHints{}
+	}
+	if s.memoryTopologyHints[podUID] == nil {
+		s.memoryTopologyHints[podUID] = make(map[string]TopologyHint)
+	}
+	s.memoryTopologyHints[podUID][containerName] = hint
+}
+
+func removeTopologyHints(hints podTopologyHints, podUID, containerName string) {
+	delete(hints[podUID], containerName)
+	if len(hints[podUID]) == 0 {
+		delete(hints, podUID)
+	}
+}
+
+// snapshotTopologyHints retains affinities from an earlier admission or restart
+// while allowing failed attempts to release only the hints they installed.
+func (s *scope) snapshotTopologyHints(podUID, containerName string) func() error {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	cpuHint, hadCPU := s.podTopologyHints[podUID][containerName]
+	memoryHint, hadMemory := s.memoryTopologyHints[podUID][containerName]
+	return func() error {
+		s.mutex.Lock()
+		defer s.mutex.Unlock()
+		if hadCPU {
+			if s.podTopologyHints[podUID] == nil {
+				s.podTopologyHints[podUID] = make(map[string]TopologyHint)
+			}
+			s.podTopologyHints[podUID][containerName] = cpuHint
+		} else {
+			removeTopologyHints(s.podTopologyHints, podUID, containerName)
+		}
+		if hadMemory {
+			if s.memoryTopologyHints[podUID] == nil {
+				s.memoryTopologyHints[podUID] = make(map[string]TopologyHint)
+			}
+			s.memoryTopologyHints[podUID][containerName] = memoryHint
+		} else {
+			removeTopologyHints(s.memoryTopologyHints, podUID, containerName)
+		}
+		return nil
+	}
 }
 
 func (s *scope) GetPolicy() Policy {
@@ -127,10 +186,8 @@ func (s *scope) RemoveContainer(logger klog.Logger, containerID string) error {
 	// containerName are already associated with a *different* containerID now. Only remove
 	// the TopologyHints associated with that podUID and containerName if this is not true
 	if _, err := s.podMap.GetContainerID(podUIDString, containerName); err != nil {
-		delete(s.podTopologyHints[podUIDString], containerName)
-		if len(s.podTopologyHints[podUIDString]) == 0 {
-			delete(s.podTopologyHints, podUIDString)
-		}
+		removeTopologyHints(s.podTopologyHints, podUIDString, containerName)
+		removeTopologyHints(s.memoryTopologyHints, podUIDString, containerName)
 	}
 
 	return nil

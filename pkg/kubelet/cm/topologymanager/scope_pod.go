@@ -63,13 +63,14 @@ func (s *podScope) Admit(ctx context.Context, pod *v1.Pod, operation lifecycle.O
 }
 
 func (s *podScope) admitUsingContainerResources(ctx context.Context, pod *v1.Pod, operation lifecycle.Operation) lifecycle.PodAdmitResult {
+	placement := ResolveNUMAPlacement(pod)
 	logger := klog.FromContext(ctx)
 
-	var bestHint TopologyHint
+	var bestHint, memoryHint TopologyHint
 	var admit bool
-	if pod.Spec.NUMANode != nil {
+	if placement.Required {
 		if operation != lifecycle.AddOperation {
-			return admission.GetPodAdmitResult(numaPlacementError{fmt.Sprintf("NUMA node %d does not support in-place resource resize; replace the Pod", *pod.Spec.NUMANode)})
+			return admission.GetPodAdmitResult(numaPlacementError{fmt.Sprintf("NUMA node %d does not support in-place resource resize; replace the Pod", placement.CPU)})
 		}
 		for _, container := range append(pod.Spec.InitContainers, pod.Spec.Containers...) {
 			for _, provider := range s.hintProviders {
@@ -83,10 +84,15 @@ func (s *podScope) admitUsingContainerResources(ctx context.Context, pod *v1.Pod
 			}
 		}
 		var err error
-		bestHint, err = s.requestedAffinity(logger, pod, operation)
+		bestHint, err = s.requestedAffinity(logger, pod, placement, operation)
 		if err != nil {
 			return admission.GetPodAdmitResult(err)
 		}
+		memoryMask, err := bitmask.NewBitMask(placement.Memory)
+		if err != nil {
+			return admission.GetPodAdmitResult(numaPlacementError{fmt.Sprintf("invalid requested NUMA node %d: %v", placement.Memory, err)})
+		}
+		memoryHint = TopologyHint{NUMANodeAffinity: memoryMask, Preferred: true}
 		admit = true
 	} else {
 		bestHint, admit = s.checkAffinity(logger, pod, operation)
@@ -98,10 +104,16 @@ func (s *podScope) admitUsingContainerResources(ctx context.Context, pod *v1.Pod
 	var acquired []func() error
 	for _, container := range append(pod.Spec.InitContainers, pod.Spec.Containers...) {
 		logger.Info("Topology Affinity", "bestHint", bestHint, "pod", klog.KObj(pod), "containerName", container.Name)
+		if placement.Required {
+			acquired = append(acquired, s.snapshotTopologyHints(string(pod.UID), container.Name))
+		}
 		s.setTopologyHints(string(pod.UID), container.Name, bestHint)
+		if placement.Required {
+			s.setMemoryTopologyHints(string(pod.UID), container.Name, memoryHint)
+		}
 
 		var err error
-		if pod.Spec.NUMANode != nil {
+		if placement.Required {
 			var current []func() error
 			current, err = s.allocateRequestedResources(ctx, pod, &container, operation)
 			acquired = append(acquired, current...)
@@ -133,8 +145,8 @@ type numaDeviceAffinityError struct{ message string }
 func (e numaDeviceAffinityError) Error() string { return e.message }
 func (e numaDeviceAffinityError) Type() string  { return ErrorTopologyAffinity }
 
-func (s *podScope) requestedAffinity(logger klog.Logger, pod *v1.Pod, operation lifecycle.Operation) (TopologyHint, error) {
-	id := int(*pod.Spec.NUMANode)
+func (s *podScope) requestedAffinity(logger klog.Logger, pod *v1.Pod, placement NUMAPlacement, operation lifecycle.Operation) (TopologyHint, error) {
+	id := placement.CPU
 	mask, err := bitmask.NewBitMask(id)
 	if err != nil {
 		return TopologyHint{}, numaPlacementError{fmt.Sprintf("invalid requested NUMA node %d: %v", id, err)}
@@ -147,6 +159,14 @@ func (s *podScope) requestedAffinity(logger klog.Logger, pod *v1.Pod, operation 
 			restored = checker.HasRestoredNUMAPlacement(pod)
 		}
 		for name, hints := range resources {
+			resourceID := placement.CPU
+			if name == string(v1.ResourceMemory) || corehelper.IsHugePageResourceName(v1.ResourceName(name)) {
+				resourceID = placement.Memory
+			}
+			resourceMask, err := bitmask.NewBitMask(resourceID)
+			if err != nil {
+				return TopologyHint{}, numaPlacementError{fmt.Sprintf("invalid requested NUMA node %d: %v", resourceID, err)}
+			}
 			var matching []TopologyHint
 			resourceRequired := name == string(v1.ResourceCPU) || name == string(v1.ResourceMemory) || corehelper.IsHugePageResourceName(v1.ResourceName(name))
 			if restored && resourceRequired {
@@ -155,7 +175,7 @@ func (s *podScope) requestedAffinity(logger klog.Logger, pod *v1.Pod, operation 
 				continue
 			}
 			for _, hint := range hints {
-				if resourceRequired && hint.NUMANodeAffinity != nil && hint.NUMANodeAffinity.IsEqual(mask) ||
+				if resourceRequired && hint.NUMANodeAffinity != nil && hint.NUMANodeAffinity.IsEqual(resourceMask) ||
 					!resourceRequired && (hint.NUMANodeAffinity == nil || hint.NUMANodeAffinity.IsSet(id)) {
 					if resourceRequired {
 						hint.Preferred = true
@@ -168,12 +188,12 @@ func (s *podScope) requestedAffinity(logger klog.Logger, pod *v1.Pod, operation 
 					return TopologyHint{}, numaDeviceAffinityError{fmt.Sprintf("NUMA node %d: %s (%s)", id, NewTopologyAffinityError(), name)}
 				}
 				if name == string(v1.ResourceCPU) {
-					return TopologyHint{}, numaPlacementError{fmt.Sprintf("NUMA node %d has insufficient eligible CPUs or incompatible CPU topology", id)}
+					return TopologyHint{}, numaPlacementError{fmt.Sprintf("NUMA node %d has insufficient eligible CPUs or incompatible CPU topology", resourceID)}
 				}
 				if corehelper.IsHugePageResourceName(v1.ResourceName(name)) {
-					return TopologyHint{}, numaPlacementError{fmt.Sprintf("NUMA node %d has insufficient %s capacity or incompatible memory topology", id, name)}
+					return TopologyHint{}, numaPlacementError{fmt.Sprintf("NUMA node %d has insufficient %s capacity or incompatible memory topology", resourceID, name)}
 				}
-				return TopologyHint{}, numaPlacementError{fmt.Sprintf("NUMA node %d has insufficient ordinary memory or incompatible memory topology", id)}
+				return TopologyHint{}, numaPlacementError{fmt.Sprintf("NUMA node %d has insufficient ordinary memory or incompatible memory topology", resourceID)}
 			}
 			filteredResources[name] = matching
 		}
@@ -187,6 +207,7 @@ func (s *podScope) requestedAffinity(logger klog.Logger, pod *v1.Pod, operation 
 }
 
 func (s *podScope) allocateRequestedResources(ctx context.Context, pod *v1.Pod, container *v1.Container, operation lifecycle.Operation) ([]func() error, error) {
+	placement := ResolveNUMAPlacement(pod)
 	logger := klog.FromContext(ctx)
 	var acquired []func() error
 	for _, provider := range s.hintProviders {
@@ -207,7 +228,7 @@ func (s *podScope) allocateRequestedResources(ctx context.Context, pod *v1.Pod, 
 			}
 		}
 		if err := provider.Allocate(ctx, pod, container, operation); err != nil {
-			return acquired, numaPlacementError{fmt.Sprintf("NUMA node %d: %v", *pod.Spec.NUMANode, err)}
+			return acquired, numaPlacementError{fmt.Sprintf("NUMA node %d: %v", placement.CPU, err)}
 		}
 	}
 	return acquired, nil

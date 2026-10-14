@@ -272,6 +272,7 @@ func (m *manager) Start(ctx context.Context, activePods ActivePodsFunc, sourcesR
 }
 
 func (m *manager) Allocate(ctx context.Context, p *v1.Pod, c *v1.Container, operation lifecycle.Operation) error {
+	placement := topologymanager.ResolveNUMAPlacement(p)
 	logger := klog.FromContext(ctx)
 
 	// Garbage collect any stranded resources before allocating CPUs.
@@ -279,7 +280,7 @@ func (m *manager) Allocate(ctx context.Context, p *v1.Pod, c *v1.Container, oper
 
 	m.Lock()
 	defer m.Unlock()
-	if p.Spec.NUMANode != nil {
+	if placement.Required {
 		if err := m.checkNUMAPlacement(p, c); err != nil {
 			return err
 		}
@@ -292,7 +293,7 @@ func (m *manager) Allocate(ctx context.Context, p *v1.Pod, c *v1.Container, oper
 		logger.Error(err, "policy error")
 		return err
 	}
-	if p.Spec.NUMANode != nil && !existed {
+	if placement.Required && !existed {
 		if m.numaPlacementAllocations == nil {
 			m.numaPlacementAllocations = make(map[string]bool)
 		}
@@ -313,16 +314,20 @@ func (m *manager) CheckNUMAPlacement(pod *v1.Pod, container *v1.Container) error
 }
 
 func (m *manager) checkNUMAPlacement(pod *v1.Pod, container *v1.Container) error {
+	placement := topologymanager.ResolveNUMAPlacement(pod)
+	if !placement.Required {
+		return nil
+	}
 	assigned, exists := m.state.GetCPUSet(string(pod.UID), container.Name)
 	if !exists {
 		return nil
 	}
-	if assigned.IsEmpty() || !assigned.IsSubsetOf(m.topology.CPUDetails.CPUsInNUMANodes(int(*pod.Spec.NUMANode))) {
-		return fmt.Errorf("CPU assignment conflicts with requested NUMA node %d: assigned CPUs %s", *pod.Spec.NUMANode, assigned)
+	if assigned.IsEmpty() || !assigned.IsSubsetOf(m.topology.CPUDetails.CPUsInNUMANodes(placement.CPU)) {
+		return fmt.Errorf("CPU assignment conflicts with requested NUMA node %d: assigned CPUs %s", placement.CPU, assigned)
 	}
 	if request, ok := container.Resources.Requests[v1.ResourceCPU]; ok && request.MilliValue() > 0 {
 		if assigned.Size() != int(request.MilliValue()/1000) {
-			return fmt.Errorf("CPU assignment conflicts with requested NUMA node %d: assigned %d CPUs, requested %s", *pod.Spec.NUMANode, assigned.Size(), request.String())
+			return fmt.Errorf("CPU assignment conflicts with requested NUMA node %d: assigned %d CPUs, requested %s", placement.CPU, assigned.Size(), request.String())
 		}
 	}
 	return nil
@@ -393,11 +398,15 @@ func (m *manager) SnapshotNUMAPlacement(pod *v1.Pod, container *v1.Container) fu
 }
 
 func (m *manager) ValidateNUMAPlacement(pod *v1.Pod, container *v1.Container) error {
+	placement := topologymanager.ResolveNUMAPlacement(pod)
+	if !placement.Required {
+		return nil
+	}
 	m.Lock()
 	defer m.Unlock()
 	_, exists := m.state.GetCPUSet(string(pod.UID), container.Name)
 	if !exists {
-		return fmt.Errorf("CPU allocation for requested NUMA node %d is missing", *pod.Spec.NUMANode)
+		return fmt.Errorf("CPU allocation for requested NUMA node %d is missing", placement.CPU)
 	}
 	return m.checkNUMAPlacement(pod, container)
 }

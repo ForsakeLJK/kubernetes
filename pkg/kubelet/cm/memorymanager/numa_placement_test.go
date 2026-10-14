@@ -1,5 +1,5 @@
 /*
-Copyright 2026 The Kubernetes Authors.
+Copyright The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@ limitations under the License.
 package memorymanager
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
@@ -306,5 +307,124 @@ func TestNUMAPlacementRecoveredHugepageReuseRollback(t *testing.T) {
 		if nodeState.MemoryMap[v1.ResourceMemory].Reserved != gib || nodeState.MemoryMap[hugepages].Reserved != gib || nodeState.NumberOfAssignments != 2 {
 			t.Fatalf("attempt %d changed restored accounting: %+v", attempt, nodeState)
 		}
+	}
+}
+
+func TestNUMAPlacementRollbackPreservesAllocationsAcrossNodes(t *testing.T) {
+	logger, _ := ktesting.NewTestContext(t)
+	pod := &v1.Pod{ObjectMeta: metav1.ObjectMeta{UID: "rollback-pair"}, Spec: v1.PodSpec{
+		InitContainers: []v1.Container{{Name: "init"}}, Containers: []v1.Container{{Name: "app"}},
+	}}
+	hugepages := v1.ResourceName("hugepages-2Mi")
+	memoryState := state.NewMemoryState(logger)
+	memoryState.SetMachineState(state.NUMANodeMap{
+		0: {Cells: []int{0}, NumberOfAssignments: 2, MemoryMap: map[v1.ResourceName]*state.MemoryTable{
+			v1.ResourceMemory: {Allocatable: 100, Free: 90, Reserved: 10}, hugepages: {Allocatable: 100, Free: 98, Reserved: 2},
+		}},
+		3: {Cells: []int{3}, NumberOfAssignments: 2, MemoryMap: map[v1.ResourceName]*state.MemoryTable{
+			v1.ResourceMemory: {Allocatable: 100, Free: 80, Reserved: 20}, hugepages: {Allocatable: 100, Free: 92, Reserved: 8},
+		}},
+	})
+	initialBlocks := []state.Block{{NUMAAffinity: []int{0}, Type: v1.ResourceMemory, Size: 10}, {NUMAAffinity: []int{0}, Type: hugepages, Size: 2}}
+	memoryState.SetMemoryBlocks(string(pod.UID), "init", initialBlocks)
+	policy := &staticPolicy{initContainersReusableMemory: map[string]map[string]map[v1.ResourceName]uint64{
+		string(pod.UID): {"0": {v1.ResourceMemory: 10, hugepages: 2}},
+	}}
+	m := &manager{state: memoryState, policy: policy}
+	rollback := m.SnapshotNUMAPlacement(pod, &pod.Spec.Containers[0])
+	// Reuse the init reservation and acquire ordinary memory and hugepages on
+	// different nodes. Another Pod acquires resources after the snapshot.
+	memoryState.SetMemoryBlocks(string(pod.UID), "init", []state.Block{{NUMAAffinity: []int{0}, Type: v1.ResourceMemory}, {NUMAAffinity: []int{0}, Type: hugepages}})
+	memoryState.SetMemoryBlocks(string(pod.UID), "app", []state.Block{
+		{NUMAAffinity: []int{0}, Type: v1.ResourceMemory, Size: 15}, {NUMAAffinity: []int{0}, Type: hugepages, Size: 2},
+		{NUMAAffinity: []int{3}, Type: hugepages, Size: 6},
+	})
+	otherBlocks := []state.Block{{NUMAAffinity: []int{3}, Type: v1.ResourceMemory, Size: 7}, {NUMAAffinity: []int{3}, Type: hugepages, Size: 1}}
+	memoryState.SetMemoryBlocks("other", "app", otherBlocks)
+	machine := memoryState.GetMachineState()
+	machine[0].NumberOfAssignments = 4
+	machine[0].MemoryMap[v1.ResourceMemory].Free = 85
+	machine[0].MemoryMap[v1.ResourceMemory].Reserved = 15
+	machine[3].NumberOfAssignments = 5
+	machine[3].MemoryMap[v1.ResourceMemory].Free = 73
+	machine[3].MemoryMap[v1.ResourceMemory].Reserved = 27
+	machine[3].MemoryMap[hugepages].Free = 85
+	machine[3].MemoryMap[hugepages].Reserved = 15
+	memoryState.SetMachineState(machine)
+	policy.initContainersReusableMemory[string(pod.UID)]["0"][v1.ResourceMemory] = 0
+	if err := rollback(logger); err != nil {
+		t.Fatal(err)
+	}
+	got := m.State().GetMachineState()
+	if got[0].MemoryMap[v1.ResourceMemory].Reserved != 10 || got[0].MemoryMap[v1.ResourceMemory].Free != 90 || got[0].NumberOfAssignments != 2 {
+		t.Fatalf("CPU-side node reservation was not restored: %+v", got[0])
+	}
+	if got[3].MemoryMap[v1.ResourceMemory].Reserved != 27 || got[3].MemoryMap[hugepages].Reserved != 9 || got[3].MemoryMap[hugepages].Free != 91 || got[3].NumberOfAssignments != 4 {
+		t.Fatalf("memory-side node rollback changed unrelated reservations: %+v", got[3])
+	}
+	if !reflect.DeepEqual(m.State().GetMemoryBlocks(string(pod.UID), "init"), initialBlocks) || m.State().GetMemoryBlocks(string(pod.UID), "app") != nil {
+		t.Fatal("rollback did not retain the restored init assignment and remove the new assignment")
+	}
+	if !reflect.DeepEqual(m.State().GetMemoryBlocks("other", "app"), otherBlocks) || policy.initContainersReusableMemory[string(pod.UID)]["0"][v1.ResourceMemory] != 10 {
+		t.Fatal("rollback changed unrelated blocks or failed to restore init reuse")
+	}
+}
+
+type memoryPlacementAffinityStore struct {
+	topologymanager.Store
+	memoryHint topologymanager.TopologyHint
+}
+
+func (s memoryPlacementAffinityStore) GetMemoryAffinity(_ klog.Logger, _, _ string) topologymanager.TopologyHint {
+	return s.memoryHint
+}
+
+func TestNUMAPlacementUsesMemoryAffinity(t *testing.T) {
+	logger, ctx := ktesting.NewTestContext(t)
+	node := int32(2)
+	resources := v1.ResourceRequirements{
+		Requests: v1.ResourceList{v1.ResourceCPU: resource.MustParse("1"), v1.ResourceMemory: resource.MustParse("1Gi")},
+		Limits:   v1.ResourceList{v1.ResourceCPU: resource.MustParse("1"), v1.ResourceMemory: resource.MustParse("1Gi")},
+	}
+	pod := &v1.Pod{ObjectMeta: metav1.ObjectMeta{UID: "memory-affinity"}, Spec: v1.PodSpec{NUMANode: &node, Containers: []v1.Container{{Name: "app", Resources: resources}}}}
+	mask, err := bitmask.NewBitMask(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	memoryHint := topologymanager.TopologyHint{NUMANodeAffinity: mask, Preferred: true}
+	cpuMask, err := bitmask.NewBitMask(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name     string
+		affinity topologymanager.Store
+	}{
+		{name: "existing shared store", affinity: topologymanager.NewFakeManagerWithHint(logger, &memoryHint)},
+		{name: "resource-specific memory store", affinity: memoryPlacementAffinityStore{
+			Store: topologymanager.NewFakeManagerWithHint(logger, &topologymanager.TopologyHint{NUMANodeAffinity: cpuMask, Preferred: true}), memoryHint: memoryHint,
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			policy, err := NewPolicyStatic(logger, nil, map[int]map[v1.ResourceName]uint64{0: {v1.ResourceMemory: 1}}, tc.affinity)
+			if err != nil {
+				t.Fatal(err)
+			}
+			memoryState := state.NewMemoryState(logger)
+			const gib = uint64(1024 * 1024 * 1024)
+			memoryState.SetMachineState(state.NUMANodeMap{2: {Cells: []int{2}, MemoryMap: map[v1.ResourceName]*state.MemoryTable{
+				v1.ResourceMemory: {TotalMemSize: 2 * gib, Allocatable: 2 * gib, Free: 2 * gib},
+			}}})
+			m := &manager{state: memoryState, policy: policy, sourcesReady: &sourcesReadyStub{}, activePods: func() []*v1.Pod { return []*v1.Pod{pod} }, containerMap: containermap.NewContainerMap()}
+			if err := m.Allocate(ctx, pod, &pod.Spec.Containers[0], lifecycle.AddOperation); err != nil {
+				t.Fatal(err)
+			}
+			if err := m.ValidateNUMAPlacement(pod, &pod.Spec.Containers[0]); err != nil {
+				t.Fatal(err)
+			}
+			if blocks := m.State().GetMemoryBlocks(string(pod.UID), "app"); len(blocks) != 1 || !reflect.DeepEqual(blocks[0].NUMAAffinity, []int{2}) || blocks[0].Size != gib {
+				t.Fatalf("memory allocation did not use the memory target: %v", blocks)
+			}
+		})
 	}
 }

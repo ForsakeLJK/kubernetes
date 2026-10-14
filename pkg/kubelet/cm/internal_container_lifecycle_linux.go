@@ -27,12 +27,14 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1"
 	"k8s.io/klog/v2"
+	"k8s.io/kubernetes/pkg/kubelet/cm/topologymanager"
 )
 
 func (i *internalContainerLifecycleImpl) PreCreateContainer(logger klog.Logger, pod *v1.Pod, container *v1.Container, containerConfig *runtimeapi.ContainerConfig) error {
-	if pod.Spec.NUMANode != nil {
+	placement := topologymanager.ResolveNUMAPlacement(pod)
+	if placement.Required {
 		if i.cpuManager == nil || i.memoryManager == nil {
-			return fmt.Errorf("NUMA node %d requires CPU and memory managers", *pod.Spec.NUMANode)
+			return fmt.Errorf("NUMA node %d requires CPU and memory managers", placement.CPU)
 		}
 		cpuValidator, cpuOK := i.cpuManager.(interface {
 			ValidateNUMAPlacement(*v1.Pod, *v1.Container) error
@@ -41,7 +43,7 @@ func (i *internalContainerLifecycleImpl) PreCreateContainer(logger klog.Logger, 
 			ValidateNUMAPlacement(*v1.Pod, *v1.Container) error
 		})
 		if !cpuOK || !memoryOK {
-			return fmt.Errorf("NUMA node %d requires CPU and memory placement validation", *pod.Spec.NUMANode)
+			return fmt.Errorf("NUMA node %d requires CPU and memory placement validation", placement.CPU)
 		}
 		if err := cpuValidator.ValidateNUMAPlacement(pod, container); err != nil {
 			return err

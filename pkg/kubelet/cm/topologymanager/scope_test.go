@@ -129,3 +129,43 @@ func TestRemoveContainer(t *testing.T) {
 	}
 
 }
+
+func TestMemoryAffinityFallbackAndCleanup(t *testing.T) {
+	logger, _ := ktesting.NewTestContext(t)
+	cpuHint := TopologyHint{NUMANodeAffinity: NewTestBitMask(0), Preferred: true}
+	memoryHint := TopologyHint{NUMANodeAffinity: NewTestBitMask(3), Preferred: true}
+	shared := NewFakeManagerWithHint(logger, &cpuHint)
+	if got := GetMemoryAffinity(shared, logger, "pod", "app"); !got.IsEqual(cpuHint) {
+		t.Fatalf("existing Store lost shared-affinity fallback: %v", got)
+	}
+	s := NewPodScope(NewNonePolicy()).(*podScope)
+	m := &manager{scope: s}
+	s.setTopologyHints("pod", "app", cpuHint)
+	if got := m.GetMemoryAffinity(logger, "pod", "app"); !got.IsEqual(cpuHint) {
+		t.Fatalf("scope lost shared-affinity fallback: %v", got)
+	}
+	s.setMemoryTopologyHints("pod", "app", memoryHint)
+	if got := m.GetMemoryAffinity(logger, "pod", "app"); !got.IsEqual(memoryHint) {
+		t.Fatalf("memory affinity was not forwarded through the manager: %v", got)
+	}
+	if got := m.GetAffinity(logger, "pod", "app"); !got.IsEqual(cpuHint) {
+		t.Fatalf("memory affinity changed CPU/device affinity: %v", got)
+	}
+	pod := &v1.Pod{}
+	pod.UID = "pod"
+	container := &v1.Container{Name: "app"}
+	s.AddContainer(pod, container, "old")
+	s.AddContainer(pod, container, "new")
+	if err := s.RemoveContainer(logger, "old"); err != nil {
+		t.Fatal(err)
+	}
+	if got := m.GetMemoryAffinity(logger, "pod", "app"); !got.IsEqual(memoryHint) {
+		t.Fatal("old container cleanup removed the restarted container's memory affinity")
+	}
+	if err := s.RemoveContainer(logger, "new"); err != nil {
+		t.Fatal(err)
+	}
+	if m.GetAffinity(logger, "pod", "app").NUMANodeAffinity != nil || m.GetMemoryAffinity(logger, "pod", "app").NUMANodeAffinity != nil {
+		t.Fatal("container cleanup retained CPU/device or memory affinity")
+	}
+}

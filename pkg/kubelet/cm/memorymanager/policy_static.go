@@ -235,7 +235,7 @@ func (p *staticPolicy) AllocatePod(logger klog.Logger, s state.State, pod *v1.Po
 
 	// 3. Handle hints and NUMA alignment.
 	machineState := s.GetMachineState()
-	bestHint := p.affinity.GetAffinity(logger, podUID, append(pod.Spec.InitContainers, pod.Spec.Containers...)[0].Name)
+	bestHint := topologymanager.GetMemoryAffinity(p.affinity, logger, podUID, append(pod.Spec.InitContainers, pod.Spec.Containers...)[0].Name)
 	if bestHint.NUMANodeAffinity == nil {
 		defaultHint, err := p.getDefaultHint(machineState, pod, podTotalMemory)
 		if err != nil {
@@ -439,6 +439,7 @@ func memoryBlocksToString(blocks []state.Block) string {
 
 // Allocate call is idempotent
 func (p *staticPolicy) Allocate(ctx context.Context, s state.State, pod *v1.Pod, container *v1.Container, operation lifecycle.Operation) (rerr error) {
+	placement := topologymanager.ResolveNUMAPlacement(pod)
 	// allocate the memory only for guaranteed pods
 	logger := klog.LoggerWithValues(klog.FromContext(ctx), "pod", klog.KObj(pod), "containerName", container.Name, "operation", operation)
 
@@ -479,10 +480,10 @@ func (p *staticPolicy) Allocate(ctx context.Context, s state.State, pod *v1.Pod,
 		}
 	}()
 	if blocks := s.GetMemoryBlocks(podUID, container.Name); blocks != nil {
-		if pod.Spec.NUMANode != nil {
+		if placement.Required {
 			for _, block := range blocks {
-				if len(block.NUMAAffinity) != 1 || block.NUMAAffinity[0] != int(*pod.Spec.NUMANode) {
-					return fmt.Errorf("memory assignment conflicts with requested NUMA node %d", *pod.Spec.NUMANode)
+				if len(block.NUMAAffinity) != 1 || block.NUMAAffinity[0] != placement.Memory {
+					return fmt.Errorf("memory assignment conflicts with requested NUMA node %d", placement.Memory)
 				}
 			}
 		}
@@ -493,24 +494,24 @@ func (p *staticPolicy) Allocate(ctx context.Context, s state.State, pod *v1.Pod,
 	}
 
 	// Call Topology Manager to get the aligned affinity across all hint providers.
-	hint := p.affinity.GetAffinity(logger, podUID, container.Name)
-	if pod.Spec.NUMANode != nil {
-		requested, err := bitmask.NewBitMask(int(*pod.Spec.NUMANode))
+	hint := topologymanager.GetMemoryAffinity(p.affinity, logger, podUID, container.Name)
+	if placement.Required {
+		requested, err := bitmask.NewBitMask(placement.Memory)
 		if err != nil {
 			return err
 		}
 		if hint.NUMANodeAffinity == nil || !hint.NUMANodeAffinity.IsEqual(requested) {
-			return fmt.Errorf("memory topology affinity does not select requested NUMA node %d", *pod.Spec.NUMANode)
+			return fmt.Errorf("memory topology affinity does not select requested NUMA node %d", placement.Memory)
 		}
 		machineState := s.GetMachineState()
-		node := machineState[int(*pod.Spec.NUMANode)]
+		node := machineState[placement.Memory]
 		if node == nil {
-			return fmt.Errorf("requested NUMA node %d has no memory state", *pod.Spec.NUMANode)
+			return fmt.Errorf("requested NUMA node %d has no memory state", placement.Memory)
 		}
 		for resourceName, size := range requestedResources {
 			memory := node.MemoryMap[resourceName]
 			if memory == nil || (size > memory.Free && size-memory.Free > p.getPodReusableMemory(pod, requested, resourceName)) {
-				return fmt.Errorf("insufficient %s on requested NUMA node %d: need %d bytes", resourceName, *pod.Spec.NUMANode, size)
+				return fmt.Errorf("insufficient %s on requested NUMA node %d: need %d bytes", resourceName, placement.Memory, size)
 			}
 		}
 	}
@@ -537,7 +538,7 @@ func (p *staticPolicy) Allocate(ctx context.Context, s state.State, pod *v1.Pod,
 	// unless skipExtend is set. skipExtend is set per container by the Windows BestEffort policy when
 	// the container follows the CPU manager's NUMA decision (see policy_best_effort.go); the Linux
 	// static policy never sets it, so the hint is extended as usual.
-	if pod.Spec.NUMANode == nil && !isAffinitySatisfyRequest(machineState, bestHint.NUMANodeAffinity, requestedResources) && !p.skipExtend {
+	if !placement.Required && !isAffinitySatisfyRequest(machineState, bestHint.NUMANodeAffinity, requestedResources) && !p.skipExtend {
 		extendedHint, err := p.extendTopologyManagerHint(machineState, pod, requestedResources, bestHint.NUMANodeAffinity)
 		if err != nil {
 			return err
@@ -822,7 +823,7 @@ func getPodRequestedResources(logger klog.Logger, pod *v1.Pod) (map[v1.ResourceN
 			reqRsrcs[rsrcName] = reqRsrcsByInitCtrs[rsrcName]
 		}
 	}
-	if pod.Spec.NUMANode != nil {
+	if topologymanager.ResolveNUMAPlacement(pod).Required {
 		for rsrcName, qty := range reqRsrcsByInitCtrs {
 			if _, found := reqRsrcs[rsrcName]; !found {
 				reqRsrcs[rsrcName] = max(qty, reqRsrcsByRestartableInitCtrs[rsrcName])
@@ -838,6 +839,7 @@ func getPodRequestedResources(logger klog.Logger, pod *v1.Pod) (map[v1.ResourceN
 }
 
 func (p *staticPolicy) GetPodTopologyHints(logger klog.Logger, s state.State, pod *v1.Pod, operation lifecycle.Operation) map[string][]topologymanager.TopologyHint {
+	placement := topologymanager.ResolveNUMAPlacement(pod)
 	logger = klog.LoggerWithValues(logger, "pod", klog.KObj(pod), "operation", operation)
 	if operation != lifecycle.AddOperation {
 		logger.V(2).Info("GetPodTopologyHints skipped, memory manager with static policy supports only add operation")
@@ -906,9 +908,9 @@ func (p *staticPolicy) GetPodTopologyHints(logger klog.Logger, s state.State, po
 
 	// the pod topology hints calculated only once for all containers, so no need to pass re-usable state
 	machineState := s.GetMachineState()
-	if pod.Spec.NUMANode != nil {
-		node := machineState[int(*pod.Spec.NUMANode)]
-		requestedMask, err := bitmask.NewBitMask(int(*pod.Spec.NUMANode))
+	if placement.Required {
+		node := machineState[placement.Memory]
+		requestedMask, err := bitmask.NewBitMask(placement.Memory)
 		if err != nil {
 			return nil
 		}

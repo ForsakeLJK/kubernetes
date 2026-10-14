@@ -130,6 +130,21 @@ type Store interface {
 	Name() string
 }
 
+// MemoryAffinityStore optionally supplies memory affinity independently of
+// CPU/device affinity. Existing stores continue to supply a shared affinity.
+type MemoryAffinityStore interface {
+	GetMemoryAffinity(logger klog.Logger, podUID string, containerName string) TopologyHint
+}
+
+// GetMemoryAffinity retains shared-affinity behavior for stores without a
+// resource-specific memory view, including the Windows CPU-following store.
+func GetMemoryAffinity(store Store, logger klog.Logger, podUID, containerName string) TopologyHint {
+	if memoryStore, ok := store.(MemoryAffinityStore); ok {
+		return memoryStore.GetMemoryAffinity(logger, podUID, containerName)
+	}
+	return store.GetAffinity(logger, podUID, containerName)
+}
+
 // AuthoritativeStore is an optional extension of Store that reports whether the
 // affinity hint for a container is authoritative. When IsHintAuthoritative
 // returns true, the consumer must use the hint as-is and must not extend it to
@@ -248,6 +263,10 @@ func (m *manager) initializeMetrics() {
 
 func (m *manager) GetAffinity(logger klog.Logger, podUID string, containerName string) TopologyHint {
 	return m.scope.GetAffinity(logger, podUID, containerName)
+}
+
+func (m *manager) GetMemoryAffinity(logger klog.Logger, podUID string, containerName string) TopologyHint {
+	return GetMemoryAffinity(m.scope, logger, podUID, containerName)
 }
 
 func (m *manager) GetPolicy() Policy {

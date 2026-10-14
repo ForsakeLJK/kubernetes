@@ -108,12 +108,26 @@ func TestRequestedNUMAPlacementRollsBackWholePod(t *testing.T) {
 			s := NewPodScope(NewSingleNumaNodePolicy(info, PolicyOptions{})).(*podScope)
 			s.AddHintProvider(logger, first)
 			s.AddHintProvider(logger, second)
+			priorCPU := TopologyHint{NUMANodeAffinity: NewTestBitMask(2), Preferred: true}
+			priorMemory := TopologyHint{NUMANodeAffinity: NewTestBitMask(0), Preferred: true}
+			s.setTopologyHints(string(pod.UID), "init", priorCPU)
+			s.setMemoryTopologyHints(string(pod.UID), "init", priorMemory)
 			result := s.Admit(ctx, pod, lifecycle.AddOperation)
 			if result.Admit || !strings.Contains(result.Message, "injected allocation failure") {
 				t.Fatalf("admission = %+v, want injected failure", result)
 			}
 			if !reflect.DeepEqual(first.assignments, map[string]bool{"init": true}) || len(second.assignments) != 0 {
 				t.Fatalf("partial allocation retained: first=%v second=%v", first.assignments, second.assignments)
+			}
+			cpu := s.GetAffinity(logger, string(pod.UID), "init")
+			memory := s.GetMemoryAffinity(logger, string(pod.UID), "init")
+			if !cpu.IsEqual(priorCPU) || !memory.IsEqual(priorMemory) {
+				t.Fatal("failed admission did not preserve pre-existing affinities")
+			}
+			for _, name := range []string{"app-a", "app-b"} {
+				if s.GetAffinity(logger, string(pod.UID), name).NUMANodeAffinity != nil || s.GetMemoryAffinity(logger, string(pod.UID), name).NUMANodeAffinity != nil {
+					t.Fatalf("failed admission retained new affinities for %s", name)
+				}
 			}
 		})
 	}
@@ -187,6 +201,23 @@ func TestRequestedNUMAPlacement(t *testing.T) {
 	result = s.Admit(ctx, newPod(), lifecycle.AddOperation)
 	if result.Admit || first.released || !first.allocated {
 		t.Fatalf("retry removed an existing assignment: %+v, first=%+v", result, first)
+	}
+}
+
+func TestRequestedNUMAZeroPlacement(t *testing.T) {
+	logger, ctx := ktesting.NewTestContext(t)
+	zero := int32(0)
+	pod := &v1.Pod{Spec: v1.PodSpec{NUMANode: &zero, Containers: []v1.Container{{Name: "app"}}}}
+	s := NewPodScope(NewSingleNumaNodePolicy(&NUMAInfo{Nodes: []int{0, 2}}, PolicyOptions{}))
+	hints := []TopologyHint{{NUMANodeAffinity: NewTestBitMask(2), Preferred: true}, {NUMANodeAffinity: NewTestBitMask(0), Preferred: false}}
+	s.AddHintProvider(logger, &numaPlacementTestProvider{mockHintProvider: mockHintProvider{th: map[string][]TopologyHint{"cpu": hints, "memory": hints}}})
+	if result := s.Admit(ctx, pod, lifecycle.AddOperation); !result.Admit {
+		t.Fatalf("explicit node zero was refused: %+v", result)
+	}
+	cpu := s.GetAffinity(logger, string(pod.UID), "app")
+	memory := GetMemoryAffinity(s, logger, string(pod.UID), "app")
+	if !cpu.NUMANodeAffinity.IsEqual(NewTestBitMask(0)) || !memory.NUMANodeAffinity.IsEqual(NewTestBitMask(0)) {
+		t.Fatalf("explicit zero followed ordinary Pod preferences: CPU=%v memory=%v", cpu, memory)
 	}
 }
 

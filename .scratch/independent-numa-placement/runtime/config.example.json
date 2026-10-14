@@ -1,0 +1,13 @@
+{
+  "node": "REPLACE_WITH_KUBERNETES_NODE",
+  "namespace": "numa-validation",
+  "image": "REPLACE_WITH_PROBE_IMAGE_DIGEST",
+  "cpu_node": 0,
+  "memory_node": 3,
+  "equal_node": 0,
+  "cpu": 1,
+  "memory": "128Mi",
+  "touch_bytes": 16777216,
+  "hold_seconds": 3600,
+  "hugepages": [{"size": "2Mi", "bytes": 2097152}]
+}

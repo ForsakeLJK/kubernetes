@@ -1,6 +1,6 @@
 # Independent CPU and memory NUMA placement design
 
-Status: design and ticket breakdown approved on 2026-10-14; 11 tickets published. Tickets 01 through 04 are resolved; the remaining software/tooling tickets are not implemented.
+Status: design and ticket breakdown approved on 2026-10-14; 11 tickets published. Tickets 01 through 05 are resolved; the remaining software/tooling tickets are not implemented.
 
 Review: [specification](spec.md), [implementation plan](implementation-plan.md),
 and [validation plan](validation-plan.md).
@@ -16,6 +16,15 @@ single shared CPU/memory target and required single-numa-node alignment conflict
 with the new split-target use case and need an explicit design revision.
 
 ## Decisions-so-far
+
+- Ticket 05 resolved on 2026-10-14: CPU-only requests select and preserve one
+  feasible automatic memory node, including CPU-less nodes, using restored/common/
+  nearest ordering and shared directed distances. Singleton allocation/runtime
+  confinement, device coordination, partial recovery, rollback, and compatibility
+  are covered. Focused checks and both review axes pass; the full suite's 145
+  failures all match earlier recorded names/packages. See
+  [verification-05.md](verification-05.md) and the
+  [ticket answer](issues/05-run-cpu-only-requests.md#answer).
 
 - Ticket 04 resolved on 2026-10-14: memory-only requests select and preserve one
   feasible CPU target using restored/common/nearest ordering and validated

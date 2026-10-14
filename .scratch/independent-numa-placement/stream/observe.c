@@ -28,7 +28,7 @@ static FILE *artifact(const char *name)
 {
     char path[4096];
     const char *directory = getenv("STREAM_RUN_DIR");
-    if (!directory || snprintf(path, sizeof(path), "%s/%s", directory, name) >= (int)sizeof(path)) {
+    if (!directory || snprintf(path, sizeof(path), "%s/%s.tmp", directory, name) >= (int)sizeof(path)) {
         fprintf(stderr, "STREAM_RUN_DIR is missing or too long\n");
         exit(3);
     }
@@ -37,10 +37,17 @@ static FILE *artifact(const char *name)
     return file;
 }
 
-static void finish(FILE *file)
+static void finish(FILE *file, const char *name)
 {
-    if (ferror(file) || fclose(file) != 0) {
-        fprintf(stderr, "cannot persist STREAM observation artifact\n");
+    int error = ferror(file) ? (errno ? errno : EIO) : 0;
+    if (fclose(file) != 0 && !error) error = errno ? errno : EIO;
+    char path[4096], target[4096];
+    const char *directory = getenv("STREAM_RUN_DIR");
+    snprintf(path, sizeof(path), "%s/%s.tmp", directory, name);
+    snprintf(target, sizeof(target), "%s/%s", directory, name);
+    if (!error && rename(path, target) != 0) error = errno;
+    if (error) {
+        fprintf(stderr, "cannot persist %s: %s\n", target, strerror(error));
         exit(3);
     }
 }
@@ -70,7 +77,7 @@ static void proc_evidence(void)
         }
         if (ferror(input)) fprintf(stderr, "incomplete read of %s\n", path);
         fclose(input);
-        finish(output);
+        finish(output, name);
     }
 #endif
 }
@@ -120,7 +127,7 @@ static void threads(void)
         }
     }
     fprintf(file, "]}\n");
-    finish(file);
+    finish(file, "threads.json");
 }
 
 static void residency(void **arrays, size_t bytes)
@@ -164,7 +171,7 @@ static void residency(void **arrays, size_t bytes)
     (void)bytes;
     fprintf(file, "{\"status\":\"unavailable\",\"reason\":\"move_pages query requires Linux\"}\n");
 #endif
-    finish(file);
+    finish(file, "residency.json");
 }
 
 void stream_observe(void *a, void *b, void *c, size_t bytes)
@@ -180,7 +187,7 @@ void stream_observe(void *a, void *b, void *c, size_t bytes)
                 (unsigned long long)((uintptr_t)arrays[i] + bytes), bytes);
     }
     fprintf(file, "]}\n");
-    finish(file);
+    finish(file, "arrays.json");
     threads();
     proc_evidence();
     fflush(stdout);

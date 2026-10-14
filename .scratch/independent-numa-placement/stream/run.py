@@ -88,6 +88,8 @@ def execute(args: argparse.Namespace, meta: dict[str, Any]) -> int:
         raise ValueError('--observe-seconds must be 0..3600; --residency-samples must be 1..1000000')
     if args.timeout <= args.observe_seconds:
         raise ValueError('--timeout must exceed --observe-seconds')
+    if any(flag.startswith(('-D', '-U', '-Wp,', '-Xpreprocessor', '-fno-openmp')) for flag in args.cflag):
+        raise ValueError('--cflag cannot override preprocessor definitions or disable OpenMP; use the workload options')
     if args.serial and (args.threads != 1 or args.mode != 'smoke'):
         raise ValueError('--serial supports only one-thread smoke runs')
     cpus = sorted(os.sched_getaffinity(0)) if hasattr(os, 'sched_getaffinity') else None
@@ -160,7 +162,8 @@ def execute(args: argparse.Namespace, meta: dict[str, Any]) -> int:
             for sig, handler in previous.items():
                 signal.signal(sig, handler)
     meta['oom_after'] = memory_events()
-    confirmed_oom = meta['oom_after'].get('oom_kill', 0) > meta['oom_before'].get('oom_kill', 0)
+    confirmed_oom = ('oom_kill' in meta['oom_before'] and 'oom_kill' in meta['oom_after']
+                     and meta['oom_after']['oom_kill'] > meta['oom_before']['oom_kill'])
     meta['oom'] = 'confirmed_in_cgroup' if confirmed_oom else ('possible' if code in (-9, 137) else 'not_observed')
     result = parse_output((output / 'stdout.txt').read_text(errors='replace'), code)
     meta.update(result=result, returncode=code, status=result['status'])
@@ -196,6 +199,9 @@ def execute(args: argparse.Namespace, meta: dict[str, Any]) -> int:
         actual_size = re.search(r'Array size = (\d+) \(elements\)', raw)
         actual_type = re.search(r'This system uses (\d+) bytes per array element', raw)
         if not actual_size or int(actual_size[1]) != args.array_size or not actual_type or actual_type[1] != '8':
+            meta['status'] = 'configuration_mismatch'
+        actual_iterations = re.search(r'Each kernel will be executed (\d+) times', raw)
+        if not actual_iterations or int(actual_iterations[1]) != args.iterations:
             meta['status'] = 'configuration_mismatch'
         if args.mode == 'bandwidth' and (result['calibration_ticks'] or 0) < 20:
             meta['status'] = 'invalid_timing'

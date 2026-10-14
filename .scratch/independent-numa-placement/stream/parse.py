@@ -48,8 +48,16 @@ def parse_output(stdout: str, returncode: int = 0) -> dict[str, Any]:
         errors.append("missing upstream MB/s table header")
     if set(kernels) != set(KERNELS):
         errors.append("missing or malformed kernel rows")
-    validated = re.findall(r"^Solution Validates: avg error less than [0-9.eE+-]+ on all three arrays\s*$", stdout, re.M)
-    validation = "pass" if len(validated) == 1 else "missing"
+    validated = re.findall(r"^Solution Validates: avg error less than (\S+) on all three arrays\s*$", stdout, re.M)
+    validation = "missing"
+    if len(validated) == 1:
+        try:
+            epsilon = float(validated[0])
+            if not math.isfinite(epsilon) or epsilon <= 0:
+                raise ValueError("validation threshold must be finite and positive")
+            validation = "pass"
+        except ValueError:
+            errors.append("malformed upstream validation threshold")
     if "Failed Validation" in stdout:
         validation = "fail"
     status = "valid"

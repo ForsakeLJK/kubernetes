@@ -39,7 +39,9 @@ fixed default flags are `-O3 -std=c99 -D_GNU_SOURCE -fopenmp`, plus
 compiler version, upstream hash, instrumented-source hash, harness hashes, and
 executable hash in `run.json`. `--cflag=...` appends an explicitly recorded flag.
 For very large static arrays on x86-64, `--cflag=-mcmodel=medium` may be needed.
-Do not override array type/size/iterations or use `TUNED` through extra flags.
+Preprocessor definition/undefinition flags and flags disabling OpenMP are rejected.
+Use the workload options for array size and iterations; array type and kernels
+remain fixed.
 Runtime compilation consumes memory and CPU, so allow overhead and stabilize
 host load before comparing independent executions.
 

@@ -61,6 +61,11 @@ class ParserCLI(unittest.TestCase):
                 self.assertEqual(code, 1)
                 self.assertEqual(result["status"], "invalid_output")
 
+    def test_rejects_a_corrupted_validation_marker(self):
+        code, result = self.parse("bad-validation.stdout")
+        self.assertEqual(code, 1)
+        self.assertEqual(result["status"], "invalid_output")
+
     def test_rejects_nonfinite_bandwidth(self):
         code, result = self.parse("nonfinite.stdout")
         self.assertEqual(code, 1)
@@ -85,6 +90,20 @@ class ParserCLI(unittest.TestCase):
 
 
 class RunnerCLI(unittest.TestCase):
+    def test_rejects_compiler_flags_that_override_workload_settings(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "run"
+            result = subprocess.run(
+                [sys.executable, str(ROOT / "run.py"), "--output", str(output),
+                 "--serial", "--cc", "cc", "--array-size", "1000000",
+                 "--observe-seconds", "0", "--cflag=-DNTIMES=3"],
+                capture_output=True, text=True,
+            )
+            self.assertEqual(result.returncode, 1, result.stderr)
+            meta = json.loads((output / "run.json").read_text())
+            self.assertEqual(meta["status"], "setup_failed")
+            self.assertIn("--cflag", meta["error"])
+
     def test_arrays_are_live_in_an_untimed_observation_window(self):
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary) / "run"

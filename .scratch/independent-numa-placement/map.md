@@ -1,6 +1,6 @@
 # Independent CPU and memory NUMA placement design
 
-Status: design and ticket breakdown approved on 2026-10-14; 11 tickets published. Tickets 01 through 07 are resolved; the remaining software/tooling tickets are not implemented.
+Status: design and ticket breakdown approved on 2026-10-14; 11 tickets published. Tickets 01 through 08 are resolved; the remaining software/tooling tickets are not implemented.
 
 Review: [specification](spec.md), [implementation plan](implementation-plan.md),
 and [validation plan](validation-plan.md).
@@ -16,6 +16,15 @@ single shared CPU/memory target and required single-numa-node alignment conflict
 with the new split-target use case and need an explicit design revision.
 
 ## Decisions-so-far
+
+- Ticket 08 resolved on 2026-10-14: the independent STREAM workload pins
+  official source and compiler-image inputs, preserves timed kernels and
+  numerical validation, exposes live initialized arrays, and retains raw
+  logs plus run/build/failure metadata. Fourteen CLI tests, typechecks, native
+  C checks, serial smoke execution, and both review axes pass. Linux/OpenMP
+  image execution and actual page residency are NOT RUN in this environment.
+  See [verification-08.md](verification-08.md), [workload instructions](stream/README.md),
+  and the [ticket answer](issues/08-package-stream-workload.md#answer).
 
 - Ticket 07 resolved on 2026-10-14: ordinary memory and all requested hugepage
   sizes share one explicit or automatic memory target across applications,
@@ -160,7 +169,7 @@ No parent issue was closed or modified.
 | [10: Automate paired STREAM evaluation and evidence reporting](issues/10-automate-paired-stream-evaluation.md) | 08, 09 | ready-for-agent |
 | [11: Record user-operated VM or hardware acceptance evidence](issues/11-record-manual-runtime-evidence.md) | 10 | ready-for-agent |
 
-Current frontier after ticket 07: **08 and 09**.
+Current frontier after ticket 08: **09**.
 
 Initial frontier: **01 and 08**. A ready-for-agent status means the ticket is
 prepared, not that its dependencies are resolved. Claim only a ticket whose

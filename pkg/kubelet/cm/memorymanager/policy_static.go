@@ -440,6 +440,13 @@ func memoryBlocksToString(blocks []state.Block) string {
 // Allocate call is idempotent
 func (p *staticPolicy) Allocate(ctx context.Context, s state.State, pod *v1.Pod, container *v1.Container, operation lifecycle.Operation) (rerr error) {
 	placement := topologymanager.ResolveNUMAPlacement(pod)
+	if placement.Required && placement.Memory == -1 {
+		hint := topologymanager.GetMemoryAffinity(p.affinity, klog.FromContext(ctx), string(pod.UID), container.Name)
+		if hint.NUMANodeAffinity == nil || hint.NUMANodeAffinity.Count() != 1 {
+			return fmt.Errorf("automatic memory placement requires a resolved singleton NUMA affinity")
+		}
+		placement.Memory = hint.NUMANodeAffinity.GetBits()[0]
+	}
 	// allocate the memory only for guaranteed pods
 	logger := klog.LoggerWithValues(klog.FromContext(ctx), "pod", klog.KObj(pod), "containerName", container.Name, "operation", operation)
 
@@ -908,7 +915,7 @@ func (p *staticPolicy) GetPodTopologyHints(logger klog.Logger, s state.State, po
 
 	// the pod topology hints calculated only once for all containers, so no need to pass re-usable state
 	machineState := s.GetMachineState()
-	if placement.Required {
+	if placement.Required && placement.Memory != -1 {
 		node := machineState[placement.Memory]
 		requestedMask, err := bitmask.NewBitMask(placement.Memory)
 		if err != nil {

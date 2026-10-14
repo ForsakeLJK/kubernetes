@@ -94,11 +94,12 @@ func (s *podScope) admitUsingContainerResources(ctx context.Context, pod *v1.Pod
 			}
 		}
 		var err error
-		bestHint, err = s.requestedAffinity(logger, pod, placement, operation)
+		placement, err = s.requestedPlacement(logger, pod, placement, operation)
 		if err != nil {
 			return admission.GetPodAdmitResult(err)
 		}
-		placement.CPU = bestHint.NUMANodeAffinity.GetBits()[0]
+		cpuMask, _ := bitmask.NewBitMask(placement.CPU)
+		bestHint = TopologyHint{NUMANodeAffinity: cpuMask, Preferred: true}
 		memoryMask, err := bitmask.NewBitMask(placement.Memory)
 		if err != nil {
 			return admission.GetPodAdmitResult(numaPlacementError{fmt.Sprintf("invalid requested NUMA node %d: %v", placement.Memory, err)})
@@ -161,54 +162,76 @@ type numaResourceAffinityError struct {
 	resource v1.ResourceName
 }
 
-func (s *podScope) requestedAffinity(logger klog.Logger, pod *v1.Pod, placement NUMAPlacement, operation lifecycle.Operation) (TopologyHint, error) {
+func (s *podScope) requestedPlacement(logger klog.Logger, pod *v1.Pod, placement NUMAPlacement, operation lifecycle.Operation) (NUMAPlacement, error) {
 	providersHints := s.accumulateProvidersHints(logger, pod, operation)
-	if placement.CPU == -1 {
-		policy := s.policy.(*independentNUMAPolicy)
-		var candidates []NUMAPlacement
-		restoredCPU := -1
-		for _, provider := range s.hintProviders {
+	if placement.CPU != -1 && placement.Memory != -1 {
+		_, err := s.requestedAffinityFromHints(logger, pod, placement, providersHints)
+		return placement, err
+	}
+	policy := s.policy.(*independentNUMAPolicy)
+	automaticCPU := placement.CPU == -1
+	resource := v1.ResourceMemory
+	if automaticCPU {
+		resource = v1.ResourceCPU
+	}
+	restored := -1
+	for _, provider := range s.hintProviders {
+		for _, container := range pod.Spec.Containers {
+			nodes := sets.New[int]()
 			if cpu, ok := provider.(interface {
 				GetAssignedCPUNUMANodes(string, string) sets.Set[int]
-			}); ok {
-				for _, container := range pod.Spec.Containers {
-					nodes := cpu.GetAssignedCPUNUMANodes(string(pod.UID), container.Name)
-					if nodes.Len() == 0 {
-						continue
-					}
-					if nodes.Len() != 1 || restoredCPU != -1 && !nodes.Has(restoredCPU) {
-						return TopologyHint{}, numaPlacementError{"CPU assignments conflict with automatic singleton NUMA placement"}
-					}
-					restoredCPU = sets.List(nodes)[0]
-				}
+			}); automaticCPU && ok {
+				nodes = cpu.GetAssignedCPUNUMANodes(string(pod.UID), container.Name)
 			}
-		}
-		for _, id := range policy.numaInfo.Nodes {
-			placement.CPU = id
-			hint, err := s.requestedAffinityFromHints(logger, pod, placement, providersHints)
-			var resourceError numaResourceAffinityError
-			if errors.As(err, &resourceError) && resourceError.resource != v1.ResourceCPU {
-				return TopologyHint{}, err
+			if memory, ok := provider.(interface {
+				GetMemoryNUMANodes(klog.Logger, *v1.Pod, *v1.Container) sets.Set[int]
+			}); !automaticCPU && ok {
+				nodes = memory.GetMemoryNUMANodes(logger, pod, &container)
 			}
-			if restoredCPU == id {
-				// Surviving assignments constrain selection even when another
-				// candidate has become closer or has more free capacity.
-				return hint, err
+			if nodes.Len() == 0 {
+				continue
 			}
-			if err == nil {
-				candidates = append(candidates, placement)
+			if nodes.Len() != 1 || restored != -1 && !nodes.Has(restored) {
+				return NUMAPlacement{}, numaPlacementError{fmt.Sprintf("%s assignments conflict with automatic singleton NUMA placement", resource)}
 			}
+			restored = sets.List(nodes)[0]
 		}
-		if restoredCPU != -1 {
-			return TopologyHint{}, numaPlacementError{fmt.Sprintf("restored CPU NUMA node %d is absent from the topology", restoredCPU)}
-		}
-		selected, err := policy.numaInfo.closestPlacement(candidates)
-		if err != nil {
-			return TopologyHint{}, numaPlacementError{err.Error()}
-		}
-		return s.requestedAffinityFromHints(logger, pod, selected, providersHints)
 	}
-	return s.requestedAffinityFromHints(logger, pod, placement, providersHints)
+	var candidates []NUMAPlacement
+	for _, id := range policy.numaInfo.Nodes {
+		if restored != -1 && restored != id {
+			continue
+		}
+		if automaticCPU {
+			placement.CPU = id
+		} else {
+			placement.Memory = id
+		}
+		_, err := s.requestedAffinityFromHints(logger, pod, placement, providersHints)
+		var resourceError numaResourceAffinityError
+		if errors.As(err, &resourceError) && resourceError.resource != resource || !automaticCPU && err != nil && !errors.As(err, &resourceError) {
+			return NUMAPlacement{}, err
+		}
+		if restored == id {
+			// Surviving assignments constrain selection even when another
+			// candidate has become closer or has more free capacity.
+			return placement, err
+		}
+		if err == nil {
+			candidates = append(candidates, placement)
+		}
+	}
+	if restored != -1 {
+		return NUMAPlacement{}, numaPlacementError{fmt.Sprintf("restored %s NUMA node %d is absent from the topology", resource, restored)}
+	}
+	if len(candidates) == 0 && !automaticCPU {
+		return NUMAPlacement{}, numaPlacementError{"no feasible singleton memory node with sufficient ordinary memory capacity and compatible memory topology"}
+	}
+	selected, err := policy.numaInfo.closestPlacement(candidates)
+	if err != nil {
+		return NUMAPlacement{}, numaPlacementError{err.Error()}
+	}
+	return selected, nil
 }
 
 func (s *podScope) requestedAffinityFromHints(logger klog.Logger, pod *v1.Pod, placement NUMAPlacement, hints []map[string][]TopologyHint) (TopologyHint, error) {
@@ -370,6 +393,9 @@ func (s *podScope) updateSuccessMetrics(logger klog.Logger, pod *v1.Pod) {
 	if placement.Independent {
 		if placement.CPU == -1 {
 			placement.CPU = s.GetAffinity(logger, string(pod.UID), pod.Spec.Containers[0].Name).NUMANodeAffinity.GetBits()[0]
+		}
+		if placement.Memory == -1 {
+			placement.Memory = s.GetMemoryAffinity(logger, string(pod.UID), pod.Spec.Containers[0].Name).NUMANodeAffinity.GetBits()[0]
 		}
 		logger.Info("Independent NUMA placement admitted", "pod", klog.KObj(pod), "cpuNUMA", placement.CPU, "memNUMA", placement.Memory, "cpuExplicit", pod.Spec.CPUNUMA != nil, "memoryExplicit", pod.Spec.MemNUMA != nil)
 		if placement.CPU != placement.Memory {

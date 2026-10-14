@@ -334,6 +334,23 @@ func (m *manager) checkNUMAPlacement(pod *v1.Pod, container *v1.Container) error
 	if len(blocks) == 0 {
 		return fmt.Errorf("memory assignment conflicts with requested NUMA node %d: no memory blocks", placement.Memory)
 	}
+	if placement.Memory == -1 {
+		if len(blocks[0].NUMAAffinity) != 1 {
+			return fmt.Errorf("memory assignment conflicts with automatic singleton NUMA placement: assigned nodes %v", blocks[0].NUMAAffinity)
+		}
+		placement.Memory = blocks[0].NUMAAffinity[0]
+		policy, ok := m.policy.(*staticPolicy)
+		if !ok {
+			return fmt.Errorf("automatic memory placement requires the static memory policy")
+		}
+		hint := topologymanager.GetMemoryAffinity(policy.affinity, klog.Background(), string(pod.UID), container.Name)
+		if hint.NUMANodeAffinity != nil {
+			if hint.NUMANodeAffinity.Count() != 1 {
+				return fmt.Errorf("automatic memory placement requires a singleton NUMA affinity")
+			}
+			placement.Memory = hint.NUMANodeAffinity.GetBits()[0]
+		}
+	}
 	requested, err := getContainerRequestedResources(klog.Background(), pod, container)
 	if err != nil {
 		return fmt.Errorf("memory assignment for requested NUMA node %d: %w", placement.Memory, err)

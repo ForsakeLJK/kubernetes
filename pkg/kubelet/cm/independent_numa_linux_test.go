@@ -44,6 +44,7 @@ import (
 	"k8s.io/kubernetes/pkg/kubelet/cm/cpumanager"
 	cpustate "k8s.io/kubernetes/pkg/kubelet/cm/cpumanager/state"
 	"k8s.io/kubernetes/pkg/kubelet/cm/memorymanager"
+	memorystate "k8s.io/kubernetes/pkg/kubelet/cm/memorymanager/state"
 	"k8s.io/kubernetes/pkg/kubelet/cm/topologymanager"
 	"k8s.io/kubernetes/pkg/kubelet/lifecycle"
 	"k8s.io/kubernetes/pkg/kubelet/metrics"
@@ -100,11 +101,37 @@ func TestIndependentNUMAAllocationAndRuntimeMasks(t *testing.T) {
 				cpuTarget, memoryTarget *int32
 				dropCheckpoint          string
 				distances               map[int][]uint64
-				wantCPU                 string
+				wantCPU, wantMemory     string
+				memoryCapacity          map[int]uint64
 				changeDistances         bool
 				preferClosest           bool
 				conflictingCPU          bool
+				conflictingMemory       bool
+				failPartialRecovery     bool
 			}{
+				{name: "CPU-only common node", cpu: "1", memory: "1Gi", cpuTarget: ptr.To[int32](0)},
+				{name: "CPU-only CPU-less nearest directed", cpu: "1", memory: "1Gi", cpuTarget: ptr.To[int32](2), wantMemory: "3", memoryCapacity: map[int]uint64{2: gib}, distances: map[int][]uint64{0: {10, 11, 20}, 2: {40, 10, 20}, 3: {20, 60, 10}}},
+				{name: "CPU-only common node with optional closest flag", cpu: "1", memory: "1Gi", cpuTarget: ptr.To[int32](2), wantMemory: "2", preferClosest: true},
+				{name: "CPU-only sole feasible memory without distances", cpu: "1", memory: "5Gi", cpuTarget: ptr.To[int32](2)},
+				{name: "CPU-only cannot aggregate memory", cpu: "1", memory: "8Gi", cpuTarget: ptr.To[int32](2), wantFailure: "no feasible singleton memory"},
+				{name: "CPU-only CPU shortage", cpu: "5", memory: "1Gi", cpuTarget: ptr.To[int32](2), wantFailure: "CPUs"},
+				{name: "CPU-only equal distances ascending ID", cpu: "1", memory: "1Gi", cpuTarget: ptr.To[int32](2), memoryCapacity: map[int]uint64{2: gib}, distances: map[int][]uint64{2: {20, 10, 20}}},
+				{name: "CPU-only nearer memory lacks capacity", cpu: "1", memory: "3Gi", cpuTarget: ptr.To[int32](2), memoryCapacity: map[int]uint64{2: gib}, distances: map[int][]uint64{2: {40, 10, 11}}},
+				{name: "CPU-only sole CPU-less memory candidate", cpu: "1", memory: "1Gi", cpuTarget: ptr.To[int32](2), wantMemory: "3", memoryCapacity: map[int]uint64{0: gib, 2: gib}},
+				{name: "CPU-only missing CPU distance row", cpu: "1", memory: "1Gi", cpuTarget: ptr.To[int32](2), memoryCapacity: map[int]uint64{2: gib}, distances: map[int][]uint64{0: {10, 11, 20}, 3: {20, 12, 10}}, wantFailure: "distance"},
+				{name: "CPU-only truncated row", cpu: "1", memory: "1Gi", cpuTarget: ptr.To[int32](2), memoryCapacity: map[int]uint64{2: gib}, distances: map[int][]uint64{2: {20, 10}}, wantFailure: "distance"},
+				{name: "CPU-only padded raw-ID row", cpu: "1", memory: "1Gi", cpuTarget: ptr.To[int32](2), memoryCapacity: map[int]uint64{2: gib}, distances: map[int][]uint64{2: {20, 0, 10, 30}}, wantFailure: "distance"},
+				{name: "CPU-only unknown candidate cannot be discarded", cpu: "1", memory: "1Gi", cpuTarget: ptr.To[int32](2), memoryCapacity: map[int]uint64{2: gib}, distances: map[int][]uint64{2: {20, 10, 0}}, wantFailure: "distance"},
+				{name: "CPU-only unreachable candidate", cpu: "1", memory: "1Gi", cpuTarget: ptr.To[int32](2), memoryCapacity: map[int]uint64{2: gib}, distances: map[int][]uint64{2: {255, 10, 30}}, wantFailure: "distance"},
+				{name: "CPU-only invalid local distance", cpu: "1", memory: "1Gi", cpuTarget: ptr.To[int32](2), memoryCapacity: map[int]uint64{2: gib}, distances: map[int][]uint64{2: {20, 20, 30}}, wantFailure: "distance"},
+				{name: "CPU-only restored memory outranks new locality", cpu: "1", memory: "1Gi", cpuTarget: ptr.To[int32](2), wantMemory: "3", memoryCapacity: map[int]uint64{2: gib}, distances: map[int][]uint64{2: {40, 10, 20}}, changeDistances: true},
+				{name: "CPU-only partial CPU restoration", cpu: "1", memory: "1Gi", cpuTarget: ptr.To[int32](2), wantMemory: "3", memoryCapacity: map[int]uint64{2: gib}, distances: map[int][]uint64{2: {40, 10, 20}}, dropCheckpoint: "cpu_manager_state", changeDistances: true},
+				{name: "CPU-only partial memory restoration", cpu: "1", memory: "1Gi", cpuTarget: ptr.To[int32](2), wantMemory: "3", memoryCapacity: map[int]uint64{2: gib}, distances: map[int][]uint64{2: {40, 10, 20}}, dropCheckpoint: "memory_manager_state"},
+				{name: "CPU-only rollback preserves surviving automatic memory", cpu: "1", memory: "1Gi", cpuTarget: ptr.To[int32](2), wantMemory: "3", memoryCapacity: map[int]uint64{2: gib}, distances: map[int][]uint64{2: {40, 10, 20}}, dropCheckpoint: "cpu_manager_state", failPartialRecovery: true},
+				{name: "CPU-only rollback preserves surviving CPUs", cpu: "1", memory: "1Gi", cpuTarget: ptr.To[int32](2), wantMemory: "3", memoryCapacity: map[int]uint64{2: gib}, distances: map[int][]uint64{2: {40, 10, 20}}, dropCheckpoint: "memory_manager_state", failPartialRecovery: true},
+				{name: "CPU-only failure after automatic memory allocation", cpu: "1", memory: "1Gi", cpuTarget: ptr.To[int32](2), memoryCapacity: map[int]uint64{2: gib}, distances: map[int][]uint64{2: {40, 10, 20}}, injectFailure: true, wantFailure: "injected provider failure"},
+				{name: "CPU-only conflicting multi-node memory checkpoint", cpu: "1", memory: "1Gi", cpuTarget: ptr.To[int32](2), wantMemory: "3", memoryCapacity: map[int]uint64{2: gib}, distances: map[int][]uint64{2: {40, 10, 20}}, conflictingMemory: true},
+
 				{name: "memory-only common node", cpu: "1", memory: "1Gi", memoryTarget: ptr.To[int32](0)},
 				{name: "memory-only common node with optional closest flag", cpu: "1", memory: "1Gi", memoryTarget: ptr.To[int32](0), preferClosest: true},
 				{name: "memory-only common node infeasible selects sole candidate", cpu: "5", memory: "1Gi", memoryTarget: ptr.To[int32](2), wantCPU: "1-5"},
@@ -165,6 +192,9 @@ func TestIndependentNUMAAllocationAndRuntimeMasks(t *testing.T) {
 					machine.Topology = []cadvisorapi.Node{info.Topology[2], info.Topology[0], info.Topology[1]}
 					for i := range machine.Topology {
 						machine.Topology[i].Distances = tc.distances[machine.Topology[i].Id]
+						if capacity, ok := tc.memoryCapacity[machine.Topology[i].Id]; ok {
+							machine.Topology[i].Memory = capacity
+						}
 					}
 					info := &machine
 					directory := t.TempDir()
@@ -243,7 +273,13 @@ func TestIndependentNUMAAllocationAndRuntimeMasks(t *testing.T) {
 					} else if tc.wantCPU == "8" {
 						expectedCPUNode = 2
 					}
-					split := tc.memoryTarget != nil && expectedCPUNode != *tc.memoryTarget
+					expectedMemoryNode := "0"
+					if tc.memoryTarget != nil {
+						expectedMemoryNode = fmt.Sprint(*tc.memoryTarget)
+					} else if tc.wantMemory != "" {
+						expectedMemoryNode = tc.wantMemory
+					}
+					split := (tc.cpuTarget != nil || tc.memoryTarget != nil) && fmt.Sprint(expectedCPUNode) != expectedMemoryNode
 					var allocatedCPU string
 					var allocatedMemory interface{}
 					for attempt := 0; attempt < 3; attempt++ {
@@ -316,7 +352,7 @@ func TestIndependentNUMAAllocationAndRuntimeMasks(t *testing.T) {
 						if tc.legacy {
 							wantCPU, wantMemory = "8", "2"
 						}
-						if tc.memoryTarget != nil {
+						if tc.cpuTarget != nil || tc.memoryTarget != nil {
 							wantCPU = "1"
 							if tc.cpuTarget != nil && *tc.cpuTarget == 2 {
 								wantCPU = "8"
@@ -324,10 +360,41 @@ func TestIndependentNUMAAllocationAndRuntimeMasks(t *testing.T) {
 							if tc.wantCPU != "" {
 								wantCPU = tc.wantCPU
 							}
-							wantMemory = fmt.Sprint(*tc.memoryTarget)
+							wantMemory = expectedMemoryNode
 						}
 						if config.Linux.Resources.CpusetCpus != wantCPU || config.Linux.Resources.CpusetMems != wantMemory {
 							t.Fatalf("runtime masks = %q/%q, want %q/%q", config.Linux.Resources.CpusetCpus, config.Linux.Resources.CpusetMems, wantCPU, wantMemory)
+						}
+						if tc.conflictingMemory {
+							checkpoint, err := memorystate.NewCheckpointState(logger, directory, "memory_manager_state", "Static")
+							if err != nil {
+								t.Fatal(err)
+							}
+							blocks := checkpoint.GetMemoryBlocks(string(pod.UID), "app")
+							blocks[0].NUMAAffinity = []int{0, 3}
+							machine := checkpoint.GetMachineState()
+							machine[3].Cells = []int{0, 3}
+							machine[0].Cells = []int{0, 3}
+							machine[3].MemoryMap[v1.ResourceMemory].Reserved -= blocks[0].Size
+							machine[3].MemoryMap[v1.ResourceMemory].Free += blocks[0].Size
+							machine[0].MemoryMap[v1.ResourceMemory].Reserved += blocks[0].Size
+							machine[0].MemoryMap[v1.ResourceMemory].Free -= blocks[0].Size
+							machine[0].NumberOfAssignments++
+							checkpoint.SetMachineState(machine)
+							checkpoint.SetMemoryBlocks(string(pod.UID), "app", blocks)
+							admit, cpu, memory = setup()
+							beforeCPU := cpu.State().GetDefaultCPUSet()
+							beforeMemory := memory.State().GetMachineState()
+							if result := admit(pod); result.Admit || !strings.Contains(result.Message, "conflict") {
+								t.Fatalf("multi-node memory recovery = %+v", result)
+							}
+							if err := (&internalContainerLifecycleImpl{cpuManager: cpu, memoryManager: memory}).PreCreateContainer(logger, pod, &pod.Spec.Containers[0], config); err == nil {
+								t.Fatal("multi-node memory checkpoint reached runtime")
+							}
+							if !reflect.DeepEqual(memory.State().GetMemoryBlocks(string(pod.UID), "app"), blocks) || !reflect.DeepEqual(memory.State().GetMachineState(), beforeMemory) || !cpu.State().GetDefaultCPUSet().Equals(beforeCPU) {
+								t.Fatal("conflicting memory checkpoint was changed")
+							}
+							return
 						}
 						if tc.conflictingCPU {
 							checkpoint, err := cpustate.NewCheckpointState(logger, directory, "cpu_manager_state", "static", containermap.NewContainerMap())
@@ -362,6 +429,9 @@ func TestIndependentNUMAAllocationAndRuntimeMasks(t *testing.T) {
 						if tc.changeDistances {
 							if attempt == 0 {
 								tc.distances = map[int][]uint64{0: {10, 20, 11}, 2: {20, 10, 50}}
+								if tc.memoryTarget == nil {
+									tc.distances = map[int][]uint64{2: {11, 10, 50}}
+								}
 							} else {
 								tc.distances = nil
 							}
@@ -369,10 +439,30 @@ func TestIndependentNUMAAllocationAndRuntimeMasks(t *testing.T) {
 								info.Topology[i].Distances = tc.distances[info.Topology[i].Id]
 							}
 						}
+						if attempt == 0 && tc.failPartialRecovery {
+							tc.injectFailure = true
+							admit, cpu, memory = setup()
+							beforeCPU := cpu.State().GetCPUAssignments()
+							beforePool := cpu.State().GetDefaultCPUSet()
+							beforeMemory := memory.State().GetMemoryAssignments()
+							beforeAccounting := memory.State().GetMachineState()
+							for retry := 0; retry < 3; retry++ {
+								if result := admit(pod); result.Admit || !strings.Contains(result.Message, "injected provider failure") {
+									t.Fatalf("partial recovery failure = %+v", result)
+								}
+								if !reflect.DeepEqual(cpu.State().GetCPUAssignments(), beforeCPU) || !cpu.State().GetDefaultCPUSet().Equals(beforePool) || !reflect.DeepEqual(memory.State().GetMemoryAssignments(), beforeMemory) || !reflect.DeepEqual(memory.State().GetMachineState(), beforeAccounting) {
+									t.Fatal("partial recovery rollback changed surviving assignments or leaked resources")
+								}
+								if store.GetAffinity(logger, string(pod.UID), "app").NUMANodeAffinity != nil || topologymanager.GetMemoryAffinity(store, logger, string(pod.UID), "app").NUMANodeAffinity != nil {
+									t.Fatal("partial recovery rollback retained new affinities")
+								}
+							}
+							return
+						}
 						admit, cpu, memory = setup()
 					}
-					if (tc.legacy || tc.memoryTarget != nil) && tc.wantFailure == "" {
-						if tc.memoryTarget != nil {
+					if (tc.legacy || tc.cpuTarget != nil || tc.memoryTarget != nil) && tc.wantFailure == "" {
+						if tc.cpuTarget != nil || tc.memoryTarget != nil {
 							tc.injectFailure = true
 							admit, cpu, memory = setup()
 							if result := admit(pod); result.Admit || !strings.Contains(result.Message, "injected provider failure") {
@@ -388,7 +478,7 @@ func TestIndependentNUMAAllocationAndRuntimeMasks(t *testing.T) {
 							conflict.Spec.NUMANode = &node
 						} else {
 							conflict.Spec.MemNUMA = ptr.To[int32](2)
-							if *tc.memoryTarget == 2 {
+							if expectedMemoryNode == "2" {
 								conflict.Spec.MemNUMA = &node
 							}
 						}
@@ -401,7 +491,7 @@ func TestIndependentNUMAAllocationAndRuntimeMasks(t *testing.T) {
 							t.Fatal("conflicting checkpoint reached runtime masks")
 						}
 					}
-					if tc.wantFailure == "" && (tc.legacy || tc.memoryTarget != nil) {
+					if tc.wantFailure == "" && (tc.legacy || tc.cpuTarget != nil || tc.memoryTarget != nil) {
 						container := &pod.Spec.Containers[0]
 						cpu.AddContainer(logger, pod, container, "cleanup")
 						memory.AddContainer(logger, pod, container, "cleanup")

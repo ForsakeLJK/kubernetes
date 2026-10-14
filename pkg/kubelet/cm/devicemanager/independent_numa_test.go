@@ -53,7 +53,7 @@ func (independentNUMAFailure) Allocate(context.Context, *v1.Pod, *v1.Container, 
 }
 
 func TestIndependentNUMADeviceAllocation(t *testing.T) {
-	for _, automatic := range []bool{false, true} {
+	for _, automatic := range []string{"", "CPU", "memory", "remote memory"} {
 		for _, tc := range []struct {
 			name                        string
 			devices                     checkpoint.DevicesPerNUMA
@@ -69,9 +69,9 @@ func TestIndependentNUMADeviceAllocation(t *testing.T) {
 			{name: "failure after all three managers", topology: true, devices: checkpoint.DevicesPerNUMA{2: {"dev1", "dev2"}}, finalFailure: true, want: "final allocation failure"},
 		} {
 			name := tc.name
-			if automatic {
-				name += " automatic CPU"
-				if tc.want == "Topology" {
+			if automatic != "" {
+				name += " automatic " + automatic
+				if automatic == "CPU" && tc.want == "Topology" {
 					tc.want = "no feasible singleton CPU"
 				}
 			}
@@ -83,7 +83,12 @@ func TestIndependentNUMADeviceAllocation(t *testing.T) {
 					{Id: 2, Memory: 8 * gib, Cores: []cadvisorapi.Core{{Id: 1, SocketID: 1, Threads: []int{1}}, {Id: 2, SocketID: 1, Threads: []int{2}}, {Id: 3, SocketID: 1, Threads: []int{3}}, {Id: 4, SocketID: 1, Threads: []int{4}}}},
 					{Id: 3, Memory: 8 * gib},
 				}}
-				scope := topologymanager.NewPodScope(topologymanager.NewIndependentNUMAPolicy(&topologymanager.NUMAInfo{Nodes: []int{0, 2, 3}}, topologymanager.PolicyOptions{}))
+				numaInfo := &topologymanager.NUMAInfo{Nodes: []int{0, 2, 3}}
+				if automatic == "remote memory" {
+					info.Topology[1].Memory = gib / 2
+					numaInfo.NUMADistances = map[int][]uint64{2: {40, 10, 20}}
+				}
+				scope := topologymanager.NewPodScope(topologymanager.NewIndependentNUMAPolicy(numaInfo, topologymanager.PolicyOptions{}))
 				directory := t.TempDir()
 				reservation := v1.ResourceList{v1.ResourceCPU: resource.MustParse("1"), v1.ResourceMemory: resource.MustParse("1Gi")}
 				cpu, err := cpumanager.NewManager(logger, "static", nil, time.Hour, info, cpuset.New(0), reservation, directory, scope)
@@ -115,8 +120,10 @@ func TestIndependentNUMADeviceAllocation(t *testing.T) {
 				scope.AddHintProvider(logger, device)
 				resources := v1.ResourceList{v1.ResourceCPU: resource.MustParse("1"), v1.ResourceMemory: resource.MustParse("1Gi"), "domain1.com/resource1": resource.MustParse("2")}
 				pod := &v1.Pod{ObjectMeta: metav1.ObjectMeta{UID: "independent-device"}, Spec: v1.PodSpec{CPUNUMA: ptr.To[int32](2), MemNUMA: ptr.To[int32](3), Containers: []v1.Container{{Name: "app", Resources: v1.ResourceRequirements{Requests: resources, Limits: resources}}}}}
-				if automatic {
+				if automatic == "CPU" {
 					pod.Spec.CPUNUMA = nil
+				} else if automatic == "memory" || automatic == "remote memory" {
+					pod.Spec.MemNUMA = nil
 				}
 				control := pod.DeepCopy()
 				control.UID = "unrelated-pod"
@@ -144,7 +151,11 @@ func TestIndependentNUMADeviceAllocation(t *testing.T) {
 					if !result.Admit {
 						t.Fatalf("admission = %+v", result)
 					}
-					if !cpu.GetCPUAffinity(string(pod.UID), "app").Equals(cpuset.New(2)) || !memory.GetMemoryNUMANodes(logger, pod, &pod.Spec.Containers[0]).Has(3) || len(device.GetDevices(string(pod.UID), "app")["domain1.com/resource1"]) != 2 {
+					memoryNode := 3
+					if automatic == "memory" {
+						memoryNode = 2
+					}
+					if !cpu.GetCPUAffinity(string(pod.UID), "app").Equals(cpuset.New(2)) || !memory.GetMemoryNUMANodes(logger, pod, &pod.Spec.Containers[0]).Has(memoryNode) || len(device.GetDevices(string(pod.UID), "app")["domain1.com/resource1"]) != 2 {
 						t.Fatal("concrete device/CPU/memory placement did not match")
 					}
 				}

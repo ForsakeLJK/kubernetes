@@ -63,10 +63,7 @@ func ValidateIndependentNUMARequest(pod *v1.Pod) error {
 	if pod.Spec.NUMANode != nil {
 		return fmt.Errorf("numaNode cannot be combined with cpuNUMA or memNUMA")
 	}
-	if pod.Spec.MemNUMA == nil {
-		return fmt.Errorf("unsupported independent-numa slice: memNUMA is required; CPU-only partial requests are not implemented")
-	}
-	if pod.Spec.CPUNUMA != nil && (placement.CPU < 0 || placement.CPU > 63) || placement.Memory < 0 || placement.Memory > 63 {
+	if pod.Spec.CPUNUMA != nil && (placement.CPU < 0 || placement.CPU > 63) || pod.Spec.MemNUMA != nil && (placement.Memory < 0 || placement.Memory > 63) {
 		return fmt.Errorf("cpuNUMA and memNUMA must be between 0 and 63")
 	}
 	if len(pod.Spec.Containers) != 1 || len(pod.Spec.InitContainers) != 0 {

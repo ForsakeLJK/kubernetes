@@ -285,6 +285,61 @@ else:
         self.assertIn("API refusal", (directory / "create/stderr.txt").read_text())
         self.assertFalse((directory / "delete").exists())
 
+    def test_api_canonical_memory_quantities_compare_equal_but_wrong_values_fail(self):
+        settings = config()
+        settings["memory"] = "1024Mi"
+        plan = self.evidence(settings)
+        for row in plan["executions"]:
+            path = self.output / "executions" / row["id"] / "pod/stdout.txt"
+            pod = json.loads(path.read_text())
+            for kind in ["requests", "limits"]:
+                pod["spec"]["containers"][0]["resources"][kind]["memory"] = "1Gi"
+            path.write_text(json.dumps(pod))
+        result = self.cli("report", "--output", self.output)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for kind in ["requests", "limits"]:
+            pod["spec"]["containers"][0]["resources"][kind]["memory"] = "2Gi"
+        path.write_text(json.dumps(pod))
+        result = self.cli("report", "--output", self.output)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        report = json.loads((self.output / "report.json").read_text())
+        self.assertIn("resources", " ".join(report["executions"][-1]["reasons"]))
+
+    def test_lost_create_response_cleans_owned_pod_and_preserves_name_collisions(self):
+        settings = config()
+        settings["evidence_origin"] = "live"
+        for collision in (False, True):
+            with self.subTest(collision=collision):
+                self.output = self.base / ("collision" if collision else "owned")
+                self.assertEqual(self.prepare(settings).returncode, 0)
+                active = self.base / ("collision-active" if collision else "owned-active")
+                engine = self.base / "kubectl-fixture"
+                engine.write_text("#!"+sys.executable+"\nimport json,pathlib,sys\nactive=pathlib.Path("+repr(str(active))+")\ncollision="+repr(collision)+"\n"+r'''
+a=sys.argv[1:]
+if a[:2] == ['get','--raw']:
+    print(json.dumps({'kubeletconfig':{'cpuManagerPolicy':'static','memoryManagerPolicy':'Static',
+        'topologyManagerPolicy':'independent-numa','topologyManagerScope':'pod'}}))
+elif a[:2] == ['get','node']:
+    print(json.dumps({'metadata':{'name':'worker'},'status':{'nodeInfo':{'operatingSystem':'linux'}}}))
+else:
+    a=a[2:]
+    if a[0] == 'create':
+        pod=json.loads(pathlib.Path(a[2]).read_text())
+        if collision: pod['metadata']['labels']={'numa-stream-owner':'different-experiment'}
+        active.write_text(json.dumps(pod))
+        print('synthetic lost create response', file=sys.stderr)
+        sys.exit(1)
+    elif a[:2] == ['get','pod']: print(active.read_text())
+    elif a[0] == 'delete': active.unlink()
+    else: print('{}')
+''')
+                engine.chmod(0o755)
+                result = self.cli("run", "--output", self.output, "--kubectl", engine)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertEqual(active.exists(), collision)
+                directory = next((self.output / "executions").iterdir())
+                self.assertEqual((directory / "delete/command.json").exists(), not collision)
+
     def test_orchestrates_external_kubectl_boundary_and_cleans_each_pod(self):
         settings = config()
         settings["mode"] = "smoke"

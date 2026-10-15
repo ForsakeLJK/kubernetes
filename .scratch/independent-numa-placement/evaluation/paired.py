@@ -16,7 +16,6 @@
 """Prepare, execute, and report sequential paired STREAM Pods with retained evidence."""
 
 import argparse
-import hashlib
 import json
 from pathlib import Path
 import re
@@ -25,6 +24,7 @@ import sys
 import tarfile
 import time
 from typing import Any
+import uuid
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT.parent / 'stream'))
@@ -131,6 +131,7 @@ def make_plan(c: dict[str, Any], token: str) -> dict[str, Any]:
             for case in (['a', 'b'] if repeat % 2 == 0 else ['b', 'a']):
                 identifier = f't{threads}-{repeat:03d}-{case}'
                 executions.append({'id':identifier, 'case':case, 'threads':threads,
+                                   'owner':token,
                                    'phase':'warmup' if repeat == 0 else 'measured',
                                    'pod':f'stream-{token}-{identifier}',
                                    'manifest':f'manifests/{identifier}.json'})
@@ -139,7 +140,8 @@ def make_plan(c: dict[str, Any], token: str) -> dict[str, Any]:
 
 def manifest(c: dict[str, Any], row: dict[str, Any]) -> dict[str, Any]:
     resources = {'cpu':str(c['cpu']), 'memory':c['memory']}
-    return {'apiVersion':'v1', 'kind':'Pod', 'metadata':{'name':row['pod'], 'namespace':c['namespace']},
+    return {'apiVersion':'v1', 'kind':'Pod', 'metadata':{'name':row['pod'], 'namespace':c['namespace'],
+                                                      'labels':{'numa-stream-owner':row['owner']}},
             'spec':{'nodeName':c['node'], 'cpuNUMA':c['cpu_node'],
                     'memNUMA':c['memory_nodes'][0 if row['case'] == 'a' else 1],
                     'restartPolicy':'Never', 'terminationGracePeriodSeconds':1,
@@ -165,7 +167,7 @@ def prepare(config: Path, output: Path) -> int:
         for backing in c['environment'].get('backing', []):
             if backing.get('evidence') == name:
                 backing['evidence'] = target
-    plan = make_plan(c, hashlib.sha256(str(output.resolve()).encode()).hexdigest()[:8])
+    plan = make_plan(c, uuid.uuid4().hex)
     for row in plan['executions']:
         save(output/row['manifest'], manifest(c, row))
     save(output/'plan.json', plan)
@@ -185,7 +187,7 @@ def capture(directory: Path, label: str, command: list[str], timeout: int) -> su
 def checked_plan(output: Path) -> dict[str, Any]:
     plan = load(output/'plan.json')
     c = validated(plan['config'])
-    if plan != make_plan(c, plan['token']) or not re.fullmatch('[0-9a-f]{8}', plan['token']):
+    if plan != make_plan(c, plan['token']) or not re.fullmatch('[0-9a-f]{32}', plan['token']):
         raise ValueError('plan schedule is inconsistent; prepare a new evaluation')
     for row in plan['executions']:
         if load(output/row['manifest']) != manifest(c, row):
@@ -248,11 +250,27 @@ def run(output: Path, kubectl: str) -> int:
         except (OSError, ValueError, tarfile.TarError) as error:
             failure = str(error)
         finally:
+            snapshots = {}
             for label, command in [('pod', ['get', 'pod', row['pod'], '-o', 'json']),
                                     ('logs', ['logs', row['pod'], '-c', 'stream']),
                                     ('events', ['get', 'events', '--field-selector', 'involvedObject.name='+row['pod'], '-o', 'json'])]:
-                capture(directory, label, base+command, 30)
-            if created:
+                snapshots[label] = capture(directory, label, base+command, 30)
+            # A failed client response can still follow a successful API creation.
+            # Reconcile ownership, so an ambiguous create cannot leak dedicated resources
+            # and an unrelated name collision is never deleted.
+            owned = False
+            if snapshots['pod'].returncode == 0:
+                try:
+                    metadata = json.loads(snapshots['pod'].stdout)['metadata']
+                    owned = (metadata['name'] == row['pod'] and metadata['namespace'] == c['namespace']
+                             and metadata.get('labels', {}).get('numa-stream-owner') == row['owner'])
+                except (ValueError, KeyError, TypeError, AttributeError):
+                    pass
+                if not owned:
+                    failure = (failure+'; ' if failure else '')+'cleanup refused: queried Pod ownership does not match this experiment'
+            elif created:
+                failure = (failure+'; ' if failure else '')+'cannot confirm Pod ownership for cleanup; inspect the recorded Pod name'
+            if owned:
                 deleted = capture(directory, 'delete', base+['delete', 'pod', row['pod'], '--wait=true', '--timeout=120s'], 130)
                 if deleted.returncode:
                     failure = (failure+'; ' if failure else '')+'Pod cleanup failed; remove the recorded Pod before retrying'
@@ -270,6 +288,9 @@ def report(output: Path) -> int:
     save(output/'report.json', result)
     lines = [f"Paired STREAM: {result['status']}", f"Classification: {result['classification']}",
              f"Evidence: {result['evidence_origin']}; mode: {result['mode']}",
+             f"Successful controlled comparison: {result['successful_controlled_comparison']}",
+             *result['notes'], f"Interference: {result['environment']['interference']}",
+             f"Settings: {result['environment']['settings']}",
              'Rates: decimal MB/s; median and [minimum, maximum] of independent execution best rates.',
              'Page placement describes sampled initialized arrays before timed kernels.', '']
     for group in result['summaries']:

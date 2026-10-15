@@ -16,6 +16,7 @@
 """Recheck raw STREAM evidence before producing controlled paired summaries."""
 
 import hashlib
+from fractions import Fraction
 import json
 from pathlib import Path
 import re
@@ -42,6 +43,22 @@ def require(condition: Any, message: str) -> None:
 def file_hash(path: Path) -> str:
     with path.open('rb') as file:
         return hashlib.file_digest(file, 'sha256').hexdigest()
+
+
+def resource_values(resources: dict[str, Any]) -> dict[str, Any]:
+    require(set(resources) == {'requests', 'limits'}, 'unexpected resource settings')
+    values = {}
+    for kind, quantities in resources.items():
+        require(set(quantities) == {'cpu', 'memory'}, 'unexpected CPU/memory resource settings')
+        # The API canonicalizes binary quantities (1024Mi -> 1Gi). Compare values.
+        memory = re.fullmatch(r'([1-9][0-9]*)([KMGTPE]i)?', quantities['memory'])
+        require(memory, 'unsupported memory quantity in Pod resources')
+        assert memory is not None
+        memory_bytes = int(memory[1]) * (1024**('KMGTPE'.index(memory[2][0])+1) if memory[2] else 1)
+        cpu = quantities['cpu']
+        cpu_count = Fraction(cpu[:-1])/1000 if cpu.endswith('m') else Fraction(cpu)
+        values[kind] = {'cpu':cpu_count, 'memory':memory_bytes}
+    return values
 
 
 def residency_check(run: Path, size: int, node: int, samples: int, pid: int) -> None:
@@ -87,10 +104,13 @@ def assess(directory: Path, c: dict[str, Any], row: dict[str, Any], expected: di
         pod = load(directory/'pod/stdout.txt')
         require(pod['metadata']['name'] == row['pod'] and pod['metadata']['namespace'] == c['namespace'],
                 'Pod evidence identity mismatch')
+        require(pod['metadata'].get('labels', {}).get('numa-stream-owner') == row['owner'], 'Pod evidence ownership mismatch')
         for field in ('nodeName', 'cpuNUMA', 'memNUMA', 'restartPolicy'):
             require(pod['spec'][field] == expected['spec'][field], f'Pod {field} mismatch')
         container = next(p for p in pod['spec']['containers'] if p['name'] == 'stream')
-        for field in ('resources', 'image', 'command'):
+        require(resource_values(container['resources']) == resource_values(expected['spec']['containers'][0]['resources']),
+                'Pod resources mismatch')
+        for field in ('image', 'command'):
             require(container[field] == expected['spec']['containers'][0][field], f'Pod {field} mismatch')
         status = pod['status']
         require(status['phase'] == 'Running' and status['qosClass'] == 'Guaranteed', 'collector not Running/Guaranteed')

@@ -305,6 +305,33 @@ else:
         report = json.loads((self.output / "report.json").read_text())
         self.assertIn("resources", " ".join(report["executions"][-1]["reasons"]))
 
+    def test_api_canonical_decimal_cpu_quantities_compare_equal_but_wrong_values_fail(self):
+        settings = config()
+        settings["cpu"] = 1000
+        plan = self.evidence(settings)
+        for row in plan["executions"]:
+            directory = self.output / "executions" / row["id"]
+            path = directory / "pod/stdout.txt"
+            pod = json.loads(path.read_text())
+            for kind in ["requests", "limits"]:
+                pod["spec"]["containers"][0]["resources"][kind]["cpu"] = "1k"
+            path.write_text(json.dumps(pod))
+            wrapper = directory / "workload"
+            memory = 0 if row["case"] == "a" else 3
+            (wrapper / "effective-status.txt").write_text(f"Cpus_allowed_list:\t4-1003\nMems_allowed_list:\t{memory}\n")
+            (wrapper / "node-cpus.txt").write_text("4-1003\n")
+            meta = json.loads((wrapper / "run/run.json").read_text())
+            meta["allocated_cpus"] = list(range(4, 1004))
+            meta["environment"]["OMP_PLACES"] = ",".join("{%d}" % cpu for cpu in range(4, 1004))
+            (wrapper / "run/run.json").write_text(json.dumps(meta))
+        result = self.cli("report", "--output", self.output)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for kind in ["requests", "limits"]:
+            pod["spec"]["containers"][0]["resources"][kind]["cpu"] = "2k"
+        path.write_text(json.dumps(pod))
+        result = self.cli("report", "--output", self.output)
+        self.assertEqual(result.returncode, 1, result.stderr)
+
     def test_lost_create_response_cleans_owned_pod_and_preserves_name_collisions(self):
         settings = config()
         settings["evidence_origin"] = "live"

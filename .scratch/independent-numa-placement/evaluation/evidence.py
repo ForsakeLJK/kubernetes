@@ -55,8 +55,11 @@ def resource_values(resources: dict[str, Any]) -> dict[str, Any]:
         require(memory, 'unsupported memory quantity in Pod resources')
         assert memory is not None
         memory_bytes = int(memory[1]) * (1024**('KMGTPE'.index(memory[2][0])+1) if memory[2] else 1)
-        cpu = quantities['cpu']
-        cpu_count = Fraction(cpu[:-1])/1000 if cpu.endswith('m') else Fraction(cpu)
+        cpu = re.fullmatch(r'([+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?)([numkMGTPE]?)', quantities['cpu'])
+        require(cpu, 'unsupported CPU quantity in Pod resources')
+        assert cpu is not None
+        exponent = {'n':-9, 'u':-6, 'm':-3, '':0, 'k':3, 'M':6, 'G':9, 'T':12, 'P':15, 'E':18}[cpu[2]]
+        cpu_count = Fraction(cpu[1]) * Fraction(10)**exponent
         values[kind] = {'cpu':cpu_count, 'memory':memory_bytes}
     return values
 

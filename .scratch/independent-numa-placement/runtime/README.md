@@ -7,6 +7,10 @@ The user reported manually testing the earlier feature in a laptop VM on
 [older dated execution record](../../explicit-numa-placement/runtime/results.md)
 and legacy fixtures remain historical evidence, unchanged.
 
+For paired STREAM experiments use the [ticket 10 evaluation CLI](../evaluation/README.md).
+It shares command/mask evidence tooling and keeps bandwidth reports separate
+from this full placement/lifecycle acceptance matrix.
+
 Run commands below from this directory. The operator needs Python 3.10+,
 kubectl, SSH access to the Linux node, and a container builder. Save evidence
 outside the source tree. JSON manifests are also valid Kubernetes YAML.

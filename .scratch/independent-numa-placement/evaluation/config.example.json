@@ -1,0 +1,30 @@
+{
+  "node": "replace-with-worker",
+  "namespace": "numa-validation",
+  "cpu_node": 0,
+  "memory_nodes": [0, 3],
+  "image": "registry.example/numa-stream@sha256:REPLACE_WITH_ACTUAL_DIGEST",
+  "cpu": 4,
+  "memory": "1Gi",
+  "target_available_bytes": [2147483648, 2147483648],
+  "overhead_bytes": 268435456,
+  "llc_bytes": 33554432,
+  "array_size": 16777216,
+  "threads": [1, 2, 4],
+  "iterations": 10,
+  "measured_runs": 5,
+  "observe_seconds": 5,
+  "residency_samples": 4096,
+  "timeout": 600,
+  "mode": "bandwidth",
+  "cflags": [],
+  "evidence_origin": "live",
+  "environment": {
+    "kind": "vm",
+    "description": "RECORD guest/host topology and virtualization boundary",
+    "interference": "RECORD concurrent workloads and host load",
+    "settings": "RECORD THP, frequency/turbo, NUMA balancing, ballooning and reservations",
+    "fork_commit": "REPLACE_WITH_DEPLOYED_FORK_COMMIT",
+    "files": []
+  }
+}

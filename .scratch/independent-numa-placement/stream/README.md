@@ -4,6 +4,10 @@ Ticket 08 packages a **variant of official STREAM 5.10**. It needs no forked API
 Kubernetes policy, HBM hardware, or paired placement manifests. Ticket 10 owns
 paired runs and summaries; ticket 11 owns operator-collected runtime evidence.
 
+The [paired evaluation CLI](../evaluation/README.md) now supplies explicit
+placement manifests, an alternating warm-up/measured thread sweep, retained
+cluster/workload evidence and controlled-comparison reports.
+
 ## Source, build, and license
 
 `upstream/stream.c` is an unmodified copy from the

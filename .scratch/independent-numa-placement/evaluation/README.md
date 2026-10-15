@@ -94,6 +94,10 @@ timeouts, retrieval failures and cleanup errors stop the sweep and retain
 commands/status/events/logs; unexecuted rows remain NOT RUN. Interruptions
 may leave a Pod; inspect its recorded name and archive before cleanup.
 Runs cannot resume into an existing `executions` directory.
+Every Pod carries a random experiment ownership label. After a lost create
+response the runner queries that identity and cleans up its own Pod; it preserves
+an existing name collision with a different owner. Failed ownership queries
+require inspection of the retained Pod name before manual cleanup.
 
 Two concurrent Guaranteed Pods would receive different dedicated CPU sets.
 Sequential creation allows reuse but does not guarantee it. Every warm-up and
@@ -102,6 +106,9 @@ inputs, image and LLC. Workers at each equal thread count must use the same
 CPU mapping. A fixed CPU NUMA ID alone is insufficient. CPU allocation or build
 changes make the comparison FAIL; use a quiet dedicated node and repeat the
 entire experiment in a new archive after investigating.
+Resource comparison uses numeric quantities, so API canonicalization such as
+`1024Mi` to `1Gi` or CPU `1000` to `1k` preserves equality while a changed
+CPU or memory allocation fails.
 
 Each `executions/ID/` retains raw shared command-capture directories, Pod state,
 events and logs, orchestration outcome, retrieved tar output and extracted

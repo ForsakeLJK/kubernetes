@@ -1,6 +1,6 @@
 # Independent CPU and memory NUMA placement design
 
-Status: design and ticket breakdown approved on 2026-10-14; 11 tickets published. Tickets 01 through 09 are resolved; ticket 10 remains the final software/tooling deliverable.
+Status: design and ticket breakdown approved on 2026-10-14; 11 tickets published. Tickets 01 through 10 are resolved; the software/tooling milestone is delivered. Ticket 11 owns operator runtime evidence.
 
 Review: [specification](spec.md), [implementation plan](implementation-plan.md),
 and [validation plan](validation-plan.md).
@@ -16,6 +16,16 @@ single shared CPU/memory target and required single-numa-node alignment conflict
 with the new split-target use case and need an explicit design revision.
 
 ## Decisions-so-far
+
+- Ticket 10 resolved on 2026-10-15: paired STREAM automation provides explicit
+  manifests, sequential alternating warm-up/repeated thread sweeps, actual CPU/
+  build/resource matching, initialized-array residency checks and median/range
+  reports with honest VM/physical/fixture labels. All 42 relevant tooling tests,
+  typechecking and final independent Standards/Spec reviews pass. See
+  [evaluation procedure](evaluation/README.md), [verification-10.md](verification-10.md),
+  [milestone-1 readiness](milestone-1.md) and the
+  [ticket answer](issues/10-automate-paired-stream-evaluation.md#answer).
+  Ticket 11 retains live Linux/VM/hardware execution and measurements.
 
 - Ticket 09 resolved on 2026-10-14: the runnable runtime kit provides all
   placement fixtures, separate masks, touched anonymous/hugepage observation,
@@ -178,7 +188,7 @@ No parent issue was closed or modified.
 | [10: Automate paired STREAM evaluation and evidence reporting](issues/10-automate-paired-stream-evaluation.md) | 08, 09 | ready-for-agent |
 | [11: Record user-operated VM or hardware acceptance evidence](issues/11-record-manual-runtime-evidence.md) | 10 | ready-for-agent |
 
-Current frontier after ticket 09: **10**.
+Current frontier after ticket 10: **11** (user-operated runtime evidence).
 
 Initial frontier: **01 and 08**. A ready-for-agent status means the ticket is
 prepared, not that its dependencies are resolved. Claim only a ticket whose

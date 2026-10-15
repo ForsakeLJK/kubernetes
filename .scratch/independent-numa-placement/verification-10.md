@@ -36,7 +36,9 @@ backing-type labels, API refusal and sequential cleanup/retrieval.
 From the Kubernetes repository root:
 
 - `python3 -m unittest discover -s .scratch/independent-numa-placement/evaluation/tests -v`
-  — 13 tests pass, 9.298 seconds. Includes a full 12-execution synthetic cluster
+  — pre-review: 13 tests pass, 9.298 seconds; post-correction: 15 tests pass,
+  10.898 seconds; final: 16 tests pass, 11.227 seconds. Includes a full
+  12-execution synthetic cluster
   smoke through shared command capture, tar retrieval, report generation and
   deletion of every created Pod; this is not live Kubernetes execution.
 - `python3 -m unittest discover -s .scratch/independent-numa-placement/stream/tests -v`
@@ -64,5 +66,37 @@ fixture throughput is never presented as a measurement or speedup estimate.
 
 ## Review
 
-Independent Standards and Spec reviews run against the fixed baseline above.
-Final reports and any corrections are recorded after review.
+Implementation commits: `d1ee8ab825e`, `6d141ff5d8e`, `f39bebad16b`. Independent Standards
+and Spec reviews use the fixed baseline above.
+
+Initial Standards review found a P2 cleanup bug after an API-accepted create
+with a lost client response. Initial Spec review found a P2 false resource
+mismatch after Kubernetes canonicalizes `1024Mi` to `1Gi`. Both were reproduced
+with failing public CLI regressions, then corrected. Cleanup now reconciles a
+random ownership label after any attempted creation and preserves unrelated
+name collisions. Resource comparison checks numeric CPU/memory quantities.
+Both regressions and all 15 evaluation tests passed; typechecking and boilerplate
+checks passed again. Follow-up Spec review found a P3 equivalent CPU
+canonicalization edge (`1000` to `1k`). An additional public CLI regression
+failed before correction and passes with exact DecimalSI CPU parsing; changed
+quantities still fail. Unchanged STREAM/runtime suites remain green from the
+full run above.
+
+## Standards
+
+The cleanup finding is resolved: independent re-review confirmed owned-Pod
+cleanup after a failed create response and preservation of a conflicting owner.
+No documented-standard violations or actionable baseline smells remained.
+Final focused review through `f39bebad16b` also found no concrete defects or
+documented-standard violations in exact DecimalSI CPU comparison.
+
+## Spec
+
+Final independent review through `f39bebad16b`: both memory/CPU quantity
+findings are resolved. Equivalent canonical quantities compare equal and
+changed values fail. No remaining actionable Spec findings; runtime limitations
+remain consistent with ticket 10's approved software/tooling scope.
+
+Review totals: Standards 0 remaining; Spec 0 remaining. Final relevant suites:
+16 evaluation + 14 STREAM + 12 runtime = 42 tests pass. Typechecking,
+boilerplate and diff checks pass after code corrections.

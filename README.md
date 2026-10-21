@@ -1,457 +1,394 @@
-# Kubernetes NUMA placement support
+# README
 
-This is a private fork of [Kubernetes](https://github.com/kubernetes/kubernetes) for research into explicit NUMA placement. It adds a Pod-level NUMA node requirement that the kubelet's resource managers enforce.
+This repository is a fork of Kubernetes that introduces support for explicit NUMA node placement (CPU and Memory may reside in different NUMA nodes). This document provides instructions for building and using the new feature, followed by two examples. The examples were run on an Ubuntu arm64 virtual machine. The run on physical NUMA nodes has not been done yet.
 
-A Pod in this fork can set `spec.numaNode: 1` to require its CPUs and memory allocations on NUMA node 1 of the machine running it. The kubelet refuses the Pod if that node cannot satisfy the request, even when another NUMA node has spare resources. The requirement covers application containers, init containers, and sidecars, including requested hugepages.
+## How to Build
 
-The implementation covers placement, failure cleanup, and restart recovery. **Linux acceptance tests were only run on an Ubuntu ARM64 Virtual Machine.** The [test results](.scratch/explicit-numa-placement/runtime/results.md) record the automated checks and the runtime cases still awaiting execution.
+The feature is on branch `numa_support_hbm` of `github.com/ForsakeLJK/kubernetes`. Build all six control-plane and node binaries from that branch. The API server needs the new Pod fields and the kubelet needs the `independent-numa` policy, so a stock binary for either one won't work.
 
-## Run Example
+### 1. Get the source and Go
 
-The example below shows how to try the NUMA support. It was run on an Ubuntu ARM64 VM with four CPUs and about 8 GiB of RAM. The VM exposed NUMA nodes 0 and 1, with CPUs 0 and 1 on NUMA 0 and CPUs 2 and 3 on NUMA 1.
-
-Run the commands inside the VM, starting from a clone of this repository and no existing Kubernetes cluster. Adjust the CPU IDs and per-node memory reservations to match your machine. The development script starts a disposable cluster using this fork's API server and kubelet.
-
-### Build this fork
-
-#### Find the repository and inspect the VM
-
-Locate the clone:
-
-```sh
-find "$HOME" -maxdepth 5 -path '*/hack/local-up-cluster.sh' -print
+```bash
+git clone https://github.com/ForsakeLJK/kubernetes.git
+cd kubernetes
+git checkout numa_support_hbm
+cat .go-version          # 1.27.1
+go version               # must match .go-version
 ```
 
-Change into the directory containing `hack`, replacing `/path/to/clone` with that directory:
+The build also needs `make`, `rsync` and Bash 4 or newer.
 
-```sh
-cd /path/to/clone
-git rev-parse --short HEAD
-cat .go-version
-uname -m
-nproc
-free -h
-df -h .
-cat /sys/devices/system/node/online
-lscpu -e=CPU,NODE
+### 2. Build the binaries
+
+On the target machine itself:
+
+```bash
+make WHAT="cmd/kube-apiserver cmd/kube-controller-manager cmd/kube-scheduler cmd/kubelet cmd/kube-proxy cmd/kubectl"
+ls _output/bin/
 ```
 
-In the example VM, `uname -m` reported `aarch64`, the online NUMA nodes were `0-1`, and the CPU table was:
+To cross-compile from another machine (for example, from a Mac for an ARM64 Linux VM), set the platform:
 
-```text
-CPU NODE
-  0    0
-  1    0
-  2    1
-  3    1
+```bash
+KUBE_BUILD_PLATFORMS=linux/arm64 make WHAT="cmd/kube-apiserver cmd/kube-controller-manager cmd/kube-scheduler cmd/kubelet cmd/kube-proxy cmd/kubectl"
+ls _output/local/bin/linux/arm64/
 ```
 
-If Ubuntu sees only NUMA 0, configure the VM to expose another NUMA node before testing placement on both nodes. The hypervisor determines the topology visible to the guest.
+Use `linux/amd64` for an x86-64 node. Then copy the binaries to the node:
 
-#### Install the build and runtime tools
-
-```sh
-sudo apt update
-sudo apt install -y \
-  build-essential curl ca-certificates git jq python3 numactl \
-  conntrack iptables iproute2 openssl containerd runc golang-cfssl
-
-cfssl version
-command -v cfssljson
-numactl -H
+```bash
+scp _output/local/bin/linux/arm64/* user@node:/path/to/numa-bin/
 ```
 
-The development script uses `cfssl` and `cfssljson` to generate certificates. Both must be available on ARM64.
+If you change the API types, run `make update` before you build to regenerate code. Don't edit generated files by hand.
 
-#### Install Go
+### 3. Confirm the build includes the feature
 
-This checkout uses Go 1.27.1. Download the Linux ARM64 archive and verify it against the checksum from the [Go download page](https://go.dev/dl/):
+The version string is a placeholder (`v0.0.0-master+$Format:%H$`), so check the commit embedded in each binary instead:
 
-```sh
-curl -fL https://go.dev/dl/go1.27.1.linux-arm64.tar.gz \
-  -o /tmp/go1.27.1.linux-arm64.tar.gz
-
-echo '3450b45a3f9ee8568792736a5c5e70a1f2e9b36c35a8f74958c03e51d7d92bec  /tmp/go1.27.1.linux-arm64.tar.gz' \
-  | sha256sum -c -
+```bash
+go version -m _output/local/bin/linux/arm64/kubelet | grep -E 'vcs.revision|vcs.modified'
+git rev-parse HEAD       # should equal vcs.revision; vcs.modified should be false
 ```
 
-Continue when the checksum reports `OK`:
+Once the cluster is running, confirm that the API server serves the new fields:
 
-```sh
-mkdir -p "$HOME/.local/go1.27.1"
-tar -xzf /tmp/go1.27.1.linux-arm64.tar.gz \
-  -C "$HOME/.local/go1.27.1" --strip-components=1
-
-export PATH="$HOME/.local/go1.27.1/bin:$PATH"
-go version
+```bash
+kubectl explain pod.spec.cpuNUMA
+kubectl explain pod.spec.memNUMA
 ```
 
-Expect `go1.27.1 linux/arm64`. Repeat the PATH export in any new terminal used to build the fork. For another architecture, use the matching archive and checksum from the download page.
+### 4. Start a single-node test cluster (optional)
 
-#### Build the components and install etcd
+`hack/local-up-cluster.sh` reads the kubelet policy settings from environment variables. Run it on the Linux node, with etcd 3.7.1 or newer and containerd already installed:
 
-From the repository root:
-
-```sh
-GOMAXPROCS=2 make GOFLAGS='-p=2' \
-  WHAT='cmd/kube-apiserver cmd/kubelet cmd/kubectl cmd/kube-controller-manager cmd/kube-scheduler cmd/kube-proxy'
-
-hack/install-etcd.sh
-export PATH="$PWD/third_party/etcd:$PATH"
-etcd --version
-```
-
-Limiting compilation to two workers reduces memory use on the VM.
-
-### Run and check a Pod with NUMA placement
-
-Each demo Pod has one container requesting one whole CPU and 128 MiB of memory, with matching limits. One Pod selects NUMA 0 and the other selects NUMA 1. The checks read each container's effective CPU and memory-node masks.
-
-#### Configure containerd
-
-Generate a fresh containerd configuration with systemd cgroups, matching the kubelet settings used below:
-
-```sh
-sudo mkdir -p /etc/containerd
-
-containerd config default \
-  | sed 's/SystemdCgroup = false/SystemdCgroup = true/' \
-  | sudo tee /etc/containerd/config.toml >/dev/null
-
-sudo systemctl enable containerd
-sudo systemctl restart containerd
-sudo systemctl is-active containerd
-```
-
-Expect `active`. Disable swap for this session and enable forwarding for the Pod network:
-
-```sh
-sudo swapoff -a
-sudo sysctl -w net.ipv4.ip_forward=1
-sudo sysctl -w net.ipv6.conf.all.forwarding=1
-```
-
-Swap may return after a reboot; rerun `swapoff` before starting the cluster.
-
-#### Start the cluster
-
-Reserve CPU 0 for system use. On the example topology, that leaves CPU 1 for an exclusive allocation on NUMA 0 and CPUs 2 and 3 on NUMA 1. The memory reservations total `1636Mi`: `1Gi` for the system, `512Mi` for Kubernetes, and the script's default `100Mi` eviction threshold. Each NUMA node reserves `818Mi`.
-
-```sh
-mkdir -p /tmp/numa-cluster-logs /tmp/numa-cluster-config
-
-export HOSTNAME_OVERRIDE=numa-vm
-export CGROUP_DRIVER=systemd
-export FAIL_SWAP_ON=true
+```bash
 export CPUMANAGER_POLICY=static
 export MEMORY_MANAGER_POLICY=Static
-export TOPOLOGY_MANAGER_POLICY=single-numa-node
-export KUBE_ENABLE_CLUSTER_DNS=false
-export CONTROLPLANE_SUDO='sudo -E'
-export LOG_DIR=/tmp/numa-cluster-logs
-export TMP_DIR=/tmp/numa-cluster-config
+export TOPOLOGY_MANAGER_POLICY=independent-numa
+export CGROUP_DRIVER=systemd
+export CONTAINER_RUNTIME_ENDPOINT=unix:///run/containerd/containerd.sock
+export KUBELET_FLAGS="--topology-manager-scope=pod --reserved-cpus=0,4 --system-reserved=cpu=1,memory=512Mi --kube-reserved=cpu=1,memory=1024Mi --reserved-memory=0:memory=818Mi;1:memory=818Mi"
+export EVICTION_HARD='memory.available<100Mi,nodefs.available<10%,nodefs.inodesFree<5%,imagefs.available<15%'
 
-export KUBELET_FLAGS='--topology-manager-scope=pod --reserved-cpus=0 --system-reserved=memory=1Gi --kube-reserved=memory=512Mi --reserved-memory=0:memory=818Mi;1:memory=818Mi'
+sudo swapoff -a
+hack/install-etcd.sh                       # only if etcd is older than 3.7.1
+export PATH="$PWD/third_party/etcd:$PATH"
+hack/local-up-cluster.sh -o /path/to/numa-bin
 ```
 
-The API server uses the node name `numa-vm` when connecting to kubelet for `kubectl exec`. Both processes run inside this VM, and the development kubelet listens on `127.0.0.1`. Add the hostname entry once and verify it:
+The `--reserved-memory` total (818Mi + 818Mi = 1636Mi) has to equal system-reserved + kube-reserved + the memory eviction threshold (512 + 1024 + 100). Change these values to fit your machine. Leave this terminal open. The script prints the `KUBECONFIG` to export in a second terminal.
 
-```sh
-echo '127.0.0.1 numa-vm' | sudo tee -a /etc/hosts
-getent hosts numa-vm
+## How to Use
 
-sudo -v
-hack/local-up-cluster.sh -o "$PWD/_output/bin"
+This fork lets a Pod pin its CPUs to one NUMA node and its memory to a different one, using two Pod fields: `cpuNUMA` and `memNUMA`. The kubelet enforces both as hard requirements. If it can't satisfy them, it refuses the Pod; it never falls back to another node.
+
+### 1. Configure the kubelet
+
+Add these settings to the kubelet configuration on every node that will run these Pods, then restart the kubelet:
+
+```yaml
+cpuManagerPolicy: static
+memoryManagerPolicy: Static
+topologyManagerPolicy: independent-numa
+topologyManagerScope: pod
+reservedSystemCPUs: "0,4"          # example: one CPU per NUMA node
+reservedMemory:                    
+  - numaNode: 0
+    limits: {memory: 818Mi}
+  - numaNode: 1
+    limits: {memory: 818Mi}
 ```
 
-Wait for `Local Kubernetes cluster is running. Press Ctrl-C to shut it down.` Leave this terminal open while testing. The script installs the CNI networking plugins it needs.
+- The `independent-numa` policy runs only on Linux and only with `topologyManagerScope: pod`. With `container` scope the kubelet won't start.
+- Change the reserved CPUs and memory to fit your machine. The `reservedMemory` values must add up to the kubelet's `systemReserved` + `kubeReserved` + `evictionHard` memory.
+- Before you write the Pod, look up the machine's NUMA layout:
 
-Keep `CONTROLPLANE_SUDO='sudo -E'` on subsequent starts. Otherwise, the script can start the API server without sudo after the certificate directory becomes writable, then fail to open the audit log left by the first run. If you start from a new terminal, restore the Go and etcd PATH entries and repeat the configuration exports above.
-
-If startup times out waiting for the API server, inspect its log and the etcd log:
-
-```sh
-tail -n 80 /tmp/numa-cluster-logs/kube-apiserver.log
-tail -n 40 /tmp/numa-cluster-logs/etcd.log
+```bash
+lscpu | grep -i numa
+cat /sys/devices/system/node/node*/cpulist
+numactl -H          # node sizes and the distance matrix
 ```
 
-#### Connect from a second terminal
+### 2. Write the Pod
 
-Open another terminal inside Ubuntu and change into the same repository root before setting PATH:
+Put the fields at the top level of `spec`, not inside a container:
 
-```sh
-cd /path/to/clone
-export PATH="$PWD/_output/bin:$PATH"
-export KUBECONFIG=/var/run/kubernetes/admin.kubeconfig
-export NS=numa-acceptance
-export NODE=numa-vm
+```yaml
+spec:
+  cpuNUMA: 0      # NUMA node that supplies every CPU in the Pod
+  memNUMA: 1      # NUMA node that supplies all memory in the Pod
+```
 
+The Pod must meet these rules, or it is rejected:
+
+- Guaranteed QoS. Every container (application, init and sidecar) sets CPU and memory requests equal to its limits.
+- Each container requests a whole number of CPUs, such as `1` or `3` (not `500m`).
+- No Pod-level `spec.resources`.
+- Don't set `numaNode` in the same Pod as `cpuNUMA` or `memNUMA`. The API server rejects the combination even when the values match.
+- Each value is between 0 and 63. The value must be a NUMA node ID that exists on the machine, not a count of nodes.
+- The CPU node needs enough free exclusive CPUs, and the memory node needs enough free memory. Capacity added up across several nodes doesn't count.
+- The scheduler doesn't know about these fields. Use `nodeName` or a node selector to put the Pod on a machine with the right topology.
+- All three fields are immutable. You also can't resize the Pod in place or add ephemeral containers to it.
+
+### 3. What the feature supports
+
+| Pod spec                      | Result                                                       |
+| ----------------------------- | ------------------------------------------------------------ |
+| `cpuNUMA: C` and `memNUMA: M` | CPUs come from node C and memory from node M. C and M can be the same. |
+| `cpuNUMA: C` only             | CPUs come from node C. The kubelet picks the memory node (see below). |
+| `memNUMA: M` only             | Memory comes from node M. The kubelet picks the CPU node (see below). |
+| `numaNode: N` (older field)   | CPUs and memory both come from node N, as before.            |
+| No NUMA fields                | Same behavior as `single-numa-node`.                         |
+
+Other supported behavior:
+
+- A memory-only NUMA node with no CPUs, such as an HBM node, can be a `memNUMA` target. A `cpuNUMA` target must have CPUs that can be allocated.
+- Hugepage requests are also served from the memory node.
+- Topology-aware device-plugin devices are aligned with the CPU node.
+- Every container in the Pod (init containers and sidecars too) gets the same CPU node and the same memory node.
+- The selected node pair is kept across container restarts and kubelet restarts.
+
+### 4. How the kubelet picks a node you didn't specify
+
+When you set only one field, the kubelet chooses the other node in this order:
+
+1. If the Pod already has CPU or memory assigned (for example, after a kubelet restart), the kubelet keeps that node.
+2. Otherwise it tries the node you specified. With `cpuNUMA: 0` only, it tries to put memory on node 0 as well. If that node has enough free capacity, it is chosen.
+3. Otherwise it picks the node that can fit the request and has the smallest NUMA distance `distance[CPU node][memory node]`, as shown in `numactl -H`.
+4. If two nodes have the same distance, it picks the lower node ID.
+5. If distance data is missing and the kubelet can't tell which node is closest, it refuses the Pod. It never guesses by node ID. To fix this, set both fields or correct the firmware's distance table.
+
+If no node can fit the request, the kubelet refuses the Pod with a resource error. Kubelet logs and Pod events tell you whether the failure was in the CPU target, the memory target, the resources or the policy.
+
+**Scope of the guarantee:** the container's CPU affinity covers only node C, and new memory can be allocated only on node M. Pages that already exist, are shared or are file-backed (such as the page cache) may sit on other nodes, and pages are never migrated.
+
+## Example 1: CPU on NUMA node 0, memory on NUMA node 1
+
+The example machine has two NUMA nodes. Node 0 has CPUs 0-3 and node 1 has CPUs 4-7. CPUs 0 and 4 are reserved for the system. On your own machine, replace the node name and CPU IDs with your values.
+
+### Create the Pod
+
+Get the Kubernetes node name, then write the manifest:
+
+```bash
 kubectl get nodes -o wide
-kubectl explain pod.spec.numaNode
-kubectl create namespace "$NS"
-```
 
-Expect `numa-vm` to be `Ready` and the second command to describe `numaNode`. If `kubectl` is not found, check that `$PWD/_output/bin/kubectl` exists. Setting PATH from your home directory points at the wrong location.
-
-#### Create a Pod on each NUMA node
-
-The explicit `nodeName` binds these Pods to the VM. The scheduler is unchanged; the operator chooses a machine with suitable topology and capacity.
-
-```sh
-for ID in 0 1; do
-  cat > "/tmp/numa-demo-$ID.yaml" <<EOF
+cat > split-demo.yaml <<'EOF'
 apiVersion: v1
 kind: Pod
 metadata:
-  name: numa-demo-$ID
-  namespace: $NS
+  name: split-demo
 spec:
-  nodeName: $NODE
-  numaNode: $ID
+  nodeName: ubuntu-numa-test        # your node name
+  cpuNUMA: 0
+  memNUMA: 1
   containers:
-  - name: app
-    image: busybox:1.36
-    command: ["sh", "-c", "sleep 3600"]
-    resources:
-      requests: {cpu: "1", memory: 128Mi}
-      limits: {cpu: "1", memory: 128Mi}
+    - name: app
+      image: busybox:1.36
+      command: ["sh", "-c", "sleep infinity"]
+      resources:
+        requests: {cpu: "1", memory: 256Mi}
+        limits:   {cpu: "1", memory: 256Mi}
 EOF
 
-  kubectl apply -f "/tmp/numa-demo-$ID.yaml" || break
-  kubectl -n "$NS" wait \
-    --for=condition=Ready "pod/numa-demo-$ID" --timeout=300s || break
-done
+kubectl apply -f split-demo.yaml
+kubectl wait --for=condition=Ready pod/split-demo --timeout=120s
 ```
 
-If a Pod does not become ready, inspect `kubectl -n "$NS" describe pod numa-demo-0` or `numa-demo-1`. An image-pull failure does not test NUMA allocation. Use an available image with `sh`, `sleep`, `cat`, and `grep` if the VM cannot pull BusyBox.
+If the Pod stays `Pending` or shows `Failed`, find the reason with:
 
-#### Check the effective masks
-
-Read the allowed CPU and memory-node lists directly from a process inside each container:
-
-```sh
-kubectl -n "$NS" exec numa-demo-0 -c app -- \
-  sh -c 'grep -E "^(Cpus_allowed_list|Mems_allowed_list):" /proc/self/status'
-
-kubectl -n "$NS" exec numa-demo-1 -c app -- \
-  sh -c 'grep -E "^(Cpus_allowed_list|Mems_allowed_list):" /proc/self/status'
-
-lscpu -e=CPU,NODE
+```bash
+kubectl describe pod split-demo | sed -n '/Events/,$p'
+kubectl get pod split-demo -o jsonpath='{.status.reason}{"  "}{.status.message}{"\n"}'
 ```
 
-On the example topology, `numa-demo-0` should show CPU `1` and memory nodes `0`. `numa-demo-1` should show CPU `2` or `3` and memory nodes `1`. Every allowed CPU must belong to the requested NUMA node, and the memory-node list must contain exactly that node's ID. A Ready Pod alone does not establish placement. These masks describe CPU affinity and allowed memory allocation; they do not measure the physical location of every shared or cached page.
+### Verify 1: the API kept both fields
 
-You can also run the supplied checker from the repository root:
-
-```sh
-for ID in 0 1; do
-  python3 .scratch/explicit-numa-placement/runtime/check-masks.py \
-    --namespace "$NS" --pod "numa-demo-$ID" --container app \
-    --node "$ID" \
-    --node-cpus "$(cat /sys/devices/system/node/node$ID/cpulist)" || break
-done
+```bash
+kubectl get pod split-demo -o jsonpath='cpuNUMA={.spec.cpuNUMA} memNUMA={.spec.memNUMA}{"\n"}'
 ```
 
-Expect `PASS` for each Pod. If `kubectl exec` reports that it cannot resolve `numa-vm`, check `getent hosts numa-vm` and the hostname entry from the cluster setup above.
+Expected output: `cpuNUMA=0 memNUMA=1`. If a field is missing, the API server doesn't run the forked build.
 
-The full ticket06 fixture needs three allocatable CPUs per NUMA node. See [Complete the runtime acceptance tests](#complete-the-runtime-acceptance-tests) for the remaining cases.
+### Verify 2: the container's CPU and memory masks
 
-Keep the Pods and cluster running for the rejection checks below. When finished, delete the namespace with `kubectl delete namespace "$NS"` and press Ctrl-C in the cluster terminal. By default, the development script removes its etcd data on shutdown. Follow the runtime procedure when testing restart recovery and preserve the manager checkpoints.
-
-## Placement rules
-
-`numaNode` is an optional integer from 0 through 63. Omitting it keeps the existing allocation path; setting it to zero explicitly selects NUMA 0. The API stores the field as a pointer so those cases remain distinct. The ID is local to the selected machine, and the kubelet checks that it exists in the machine's topology.
-
-The scheduler has not changed. The operator still has to select a suitable machine. A Pod assigned to an unsuitable machine can fail kubelet admission, with no new mechanism to move it elsewhere.
-
-Participating Pods require this setup:
-
-| Requirement | Value |
-| --- | --- |
-| Operating system | Linux |
-| CPU Manager | `static` |
-| Memory Manager | `Static` |
-| Topology Manager | `single-numa-node` or `independent-numa`, scope `pod` |
-| Container resources | Equal CPU/memory requests and limits; positive whole-number CPU requests |
-| Pod QoS | Guaranteed |
-
-Every application container, init container, and sidecar needs those resource declarations. Pod-level resource budgets are excluded. The NUMA ID is immutable, CPU/memory resize is rejected, and ephemeral-container additions are rejected. Changing placement or resource requirements requires a replacement Pod. There is no new feature gate.
-
-Placement has two observable parts: the container's allowed CPUs all belong to the selected NUMA node, and its allowed memory-node mask contains exactly that node. Memory Manager also accounts for ordinary memory and requested hugepage sizes there. Shared or previously allocated pages can have different physical locality; this feature does not migrate them or promise that every page a process can access lives on the selected node.
-
-### The independent-numa policy
-
-Operators can select `topologyManagerPolicy: independent-numa` with
-`topologyManagerScope: pod` on Linux. Both settings must be explicit: the global
-defaults remain `none` and `container`. The new policy rejects container scope
-and the CPU Manager option `align-by-socket`. Existing topology node-count limits
-and supported policy options still apply.
-
-The policy supports ordinary Pods and the legacy combined placement
-requirement `spec.numaNode`. Ordinary Pods use the existing `single-numa-node`
-hint-merging behavior, including their existing eligibility rules. Legacy Pods
-require both static managers and the resource declarations above, and retain
-the same exact CPU/memory target, refusal, rollback, and recovery guarantees
-under either policy. For example, `numaNode: 2` always requires both resources
-on node 2 under `independent-numa`.
-
-Set both `spec.cpuNUMA` and `spec.memNUMA` to
-require separate CPU and memory targets. For example, `cpuNUMA: 0` with
-`memNUMA: 3` allocates CPUs on node 0 and confines ordinary memory and every
-requested hugepage size to node 3,
-which may have no CPUs. Equal targets are also supported. Each ID is from 0
-through 63 and is immutable; `numaNode` cannot be combined with either field.
-Both static managers, Guaranteed equal CPU/memory requests and limits, and
-positive whole CPUs are required. A shortage on a target refuses admission
-even if another node has capacity. Allocation failures roll back new resources;
-restarts reuse matching assignments and refuse conflicting checkpoints.
-
-Setting `memNUMA` alone selects one feasible CPU node automatically, including
-when the memory node has no CPUs. Selection preserves a valid restored CPU
-target, then prefers a feasible common node, then the closest feasible directed
-CPU-to-memory distance. Equal known distances select the lowest CPU node ID.
-Multiple nonlocal candidates require usable distance data; specify both targets
-or correct topology data if ranking fails. Restored, common, and sole feasible
-candidates need no distance comparison. The automatic CPU target remains
-mandatory through allocation, runtime configuration, and recovery; CPUs cannot
-span nodes to satisfy the request. The `prefer-closest-numa-nodes` option is not
-required for this selection.
-
-CPU-only requests use the same restored/common/nearest ordering to select one
-memory node, which may have no CPUs. Every application container, sequential
-init container, and restartable sidecar shares the Pod's CPU/memory node pair.
-Concrete CPU sets and memory quantities retain sequential init reuse and
-sidecar overlap. Recovery preserves surviving assignments, including when
-completed init allocations have already been released.
-
-Ordinary memory and all requested hugepage sizes form one memory group. Automatic
-memory placement ranks only nodes that can hold the entire group's effective
-peak, including init reuse and sidecar overlap. An explicit memory target refuses
-admission if any requested page size is absent or exhausted there, even when
-another node has spare pages. Recovery and rollback cover every memory resource;
-the runtime memory-node mask remains exactly the selected singleton.
-Pod budgets, resize, and ephemeral containers are excluded.
-Ordinary and legacy Pods retain their existing behavior.
-
-Successful split admissions increment
-`kubelet_topology_manager_split_numa_admissions_total`. Common-node alignment
-is counted only when concrete CPU and memory allocations share one node.
-The policy does not globally promise common-node alignment. Synthetic tests
-verify allocation, recovery, and runtime masks; Linux runtime evidence remains
-a separate operator validation step.
-
-## How the kubelet enforces it
-
-The API server checks the declaration and update restrictions. A new kubelet admission handler checks the operating system, manager configuration, and local NUMA ID before allocation.
-
-Topology Manager then restricts the eligible CPU and memory hints to the requested node. This needed more than an extra hint: the original CPU allocation path could take CPUs outside the aligned mask, and Memory Manager could expand an insufficient mask. The new allocation paths prohibit both behaviors for explicitly placed Pods.
-
-CPU Manager intersects available and reusable CPUs with the requested node's CPUs. Memory Manager checks ordinary memory and every requested hugepage size on that node. Existing rules for sequential init-container reuse and overlapping sidecars still determine how much resource the Pod needs at once.
-
-Allocation can fail after an earlier manager or container has already reserved resources. Before each provider allocation, the new path records enough state to undo that attempt. A later failure runs cleanup in reverse order, restoring CPU/memory accounting and removing newly created device records while retaining pre-existing assignments.
-
-On recovery, CPU and Memory Managers validate concrete checkpointed assignments against the request. Valid assignments are reused. Conflicting assignments block admission or affected container starts/restarts. Linux container creation checks the assignments again before passing `CpusetCpus` and `CpusetMems` to the runtime. This also catches missing assignments that would otherwise leave the runtime without the required masks.
-
-Devices keep their existing topology-policy checks. A conflicting device hint can still cause rejection. The device-manager change handles rollback; it adds no device-locality guarantee.
-
-## Where the code changed
-
-| Area | Files and reason for the change |
-| --- | --- |
-| Pod API | [External PodSpec](staging/src/k8s.io/api/core/v1/types.go) and [internal PodSpec](pkg/apis/core/types.go) add `NUMANode *int32`. Generated protobuf, deepcopy, OpenAPI, apply-configuration code, and API fixtures carry the field through serialization and clients. Workload API schemas change because they embed Pod templates. |
-| Validation | [Core validation](pkg/apis/core/validation/validation.go) checks the ID and container resources, rejects Windows declarations and Pod-level budgets, and enforces immutability, resize, and ephemeral-container restrictions. |
-| Kubelet admission | [NUMA admission handler](pkg/kubelet/numa_placement.go), registered in [kubelet initialization](pkg/kubelet/kubelet.go), rejects unsupported configurations and absent local IDs. |
-| Topology coordination | [Pod-scope Topology Manager](pkg/kubelet/cm/topologymanager/scope_pod.go) selects the requested affinity, preserves device-policy checks, validates recovered assignments, and coordinates rollback across providers and containers. |
-| CPU allocation | [Static CPU policy](pkg/kubelet/cm/cpumanager/policy_static.go) restricts allocation to the requested node. [CPU Manager](pkg/kubelet/cm/cpumanager/cpu_manager.go) validates restored assignments and snapshots assignment/reuse state for rollback. |
-| Memory and hugepages | [Static memory policy](pkg/kubelet/cm/memorymanager/policy_static.go) checks local capacity, prevents mask expansion, and includes resources requested only by init containers or sidecars. [Memory Manager](pkg/kubelet/cm/memorymanager/memory_manager.go) validates restored blocks and restores accounting after failure. |
-| Device cleanup | [Device Manager](pkg/kubelet/cm/devicemanager/manager.go) removes device allocation records created by an unsuccessful placement attempt and preserves earlier records. |
-| Container startup | [Linux container lifecycle](pkg/kubelet/cm/internal_container_lifecycle_linux.go) requires validated CPU and memory assignments before supplying the runtime masks. |
-
-No scheduler implementation changed. Tests cover API round-trips and client operations, validation, admission, allocation failures, init/sidecar accounting, hugepages, rollback, recovery, and construction of runtime masks. Constructing the correct runtime configuration still needs a separate check that the Linux runtime enforces it.
-
-## Run the automated tests
-
-Run these commands from the root of this fork with the toolchain required by its `go.mod` (Go 1.27.0 or newer for this checkout). The focused run exercises the NUMA tests without requiring a running cluster:
-
-```sh
-go test -count=1 -run 'NUMA' \
-  ./pkg/apis/core/v1 \
-  ./pkg/apis/core/validation \
-  ./pkg/kubelet \
-  ./pkg/kubelet/cm \
-  ./pkg/kubelet/cm/cpumanager \
-  ./pkg/kubelet/cm/memorymanager \
-  ./pkg/kubelet/cm/topologymanager \
-  ./pkg/kubelet/cm/devicemanager \
-  k8s.io/api/core/v1 \
-  k8s.io/client-go/kubernetes/fake
+```bash
+kubectl exec split-demo -- grep -E 'Cpus_allowed_list|Mems_allowed_list' /proc/self/status
+kubectl exec split-demo -- cat /sys/fs/cgroup/cpuset.cpus.effective /sys/fs/cgroup/cpuset.mems.effective
 ```
 
-Run on Linux to include the Linux-only container-lifecycle tests. A successful cross-compile on another operating system does not execute those tests. For broader regression coverage, rerun the command without `-run 'NUMA'`.
+Expected output:
 
-The existing results report passing focused tests, some sandbox-related socket failures in broader suites, and an incomplete repository-wide run. Earlier ticket records also contain an unclassified Device Manager race-test failure. There is no recorded full-suite pass. See the linked results record for the commands, environment, and outcomes.
-
-## Check rejection and compatibility
-
-Keep `numa-demo-0` running for these update checks:
-
-```sh
-# Removing the requirement is an immutable-field change.
-kubectl -n "$NS" patch pod numa-demo-0 --type=merge \
-  -p '{"spec":{"numaNode":null}}'
-
-# Ephemeral debug containers are excluded.
-kubectl -n "$NS" debug pod/numa-demo-0 --image=busybox:1.36 --target=app
-
-# An out-of-range ID must fail API validation.
-sed -e 's/name: numa-demo-0/name: numa-invalid-id/' \
-    -e 's/numaNode: .*/numaNode: 64/' /tmp/numa-demo-0.yaml | \
-  kubectl -n "$NS" create --dry-run=server -f -
+```text
+Cpus_allowed_list:  1          # one exclusive CPU from node 0 (1, 2 or 3)
+Mems_allowed_list:  1          # memory can come only from node 1
+1
+1
 ```
 
-Each operation should be rejected for the stated reason. The dry-run uses a separate Pod name so an existing test Pod does not obscure the validation result.
+Check that the CPU really belongs to node 0. Run this on the host:
 
-For a kubelet-level rejection, create a fresh Pod with an ID in the range 0 through 63 that is absent from the host's topology. Inspect its status and events:
-
-```sh
-export REJECTED_POD='replace-with-rejected-pod-name'
-kubectl -n "$NS" describe pod "$REJECTED_POD"
-kubectl -n "$NS" get events \
-  --field-selector "involvedObject.name=$REJECTED_POD"
+```bash
+cat /sys/devices/system/node/node0/cpulist     # 0-3
 ```
 
-The implemented admission reasons include `NUMANodeNotFound`, `NUMAPlacementUnsupported`, and `NUMAPlacementFailed`. Device topology conflicts can retain the existing topology-affinity error. Read the message for the node ID and the specific failure.
+### Verify 3: the kubelet's allocation records
 
-To test compatibility, delete `numa-demo-0`, remove its `numaNode` line from a copy of the manifest, and recreate it. It should follow the existing policies, which may choose any eligible NUMA node. Do not apply the singleton-node expectation to this control Pod.
+Run these on the host. The kubelet state directory is `/var/lib/kubelet` unless you set `--root-dir`:
 
-## Complete the runtime acceptance tests
-
-The [runtime procedure](.scratch/explicit-numa-placement/runtime/README.md) provides fixtures and commands for the remaining cases:
-
-- Application containers, an ordinary init container, and a restartable sidecar. The fixture needs three CPUs and 384 MiB at steady state. Inspect the ordinary init during its ten-minute run.
-- Hugepages on each tested NUMA node, including a write into the hugepage mount. Provision pages before testing and record per-node capacity.
-- Container restart followed by another mask check. Then restart kubelet with its checkpoints preserved, force another container restart, and check the new container's masks.
-- CPU, ordinary-memory, and hugepage shortages on the requested node while another NUMA node retains spare capacity. Bind test Pods to the machine so a scheduler refusal does not mask the kubelet behavior.
-- Failed-admission and normal-cleanup checks against CPU/Memory Manager assignments, plus device-policy behavior when a suitable device plugin is available.
-
-Record manifests, the fork commit, kubelet configuration, topology, process masks, and failure events in a dated copy of the [results record](.scratch/explicit-numa-placement/runtime/results.md). Mark unavailable cases `NOT RUN`. A `Running` Pod alone does not establish correct placement, and a failed request alone does not prove partial-allocation rollback occurred.
-
-After recording the results, remove the test namespace:
-
-```sh
-kubectl delete namespace "$NS"
+```bash
+sudo jq '.entries' /var/lib/kubelet/cpu_manager_state
+sudo jq '.entries' /var/lib/kubelet/memory_manager_state
 ```
 
-## Design records and upstream Kubernetes
+The CPU Manager entry for `app` should list a node 0 CPU. The Memory Manager entry should show `"numaAffinity": [1]` for `memory`.
 
-The [feature specification](.scratch/explicit-numa-placement/spec.md) records the agreed behavior. The [implementation tickets](.scratch/explicit-numa-placement/issues/) contain the development and verification history, and the [runtime procedure](.scratch/explicit-numa-placement/runtime/README.md) includes the multi-container and hugepage fixtures.
+### Verify 4: new memory really lands on node 1
 
-Kubernetes is an open source system for deploying and managing containerized applications. General Kubernetes documentation and contributor resources remain available upstream:
+Write 48 MiB to the container's `/dev/shm` (tmpfs). Then compare each NUMA node's `Shmem` counter on the host before and after:
 
-- [Kubernetes documentation](https://kubernetes.io)
-- [Developer documentation](https://git.k8s.io/community/contributors/devel#readme)
-- [Troubleshooting](https://kubernetes.io/docs/tasks/debug/)
-- [Community and communication](https://git.k8s.io/community/communication)
-- [Published components](staging/README.md)
+```bash
+grep Shmem: /sys/devices/system/node/node*/meminfo
 
-Use [CONTRIBUTING.md](CONTRIBUTING.md) for the repository's contribution guidance and [LICENSE](LICENSE) for its license. The NUMA field and behavior described above are additions in this fork.
+kubectl exec split-demo -- dd if=/dev/zero of=/dev/shm/fill bs=1M count=48
+
+grep Shmem: /sys/devices/system/node/node*/meminfo
+```
+
+The node 1 counter should go up by about 49152 kB, and node 0 should barely change. Clean up afterwards:
+
+```bash
+kubectl exec split-demo -- rm /dev/shm/fill
+kubectl delete pod split-demo
+```
+
+You can also run a variant with only `cpuNUMA: 0`. Its `Mems_allowed_list` should be `0`, because when node 0 has free memory the kubelet picks the same node for memory (step 2 of the selection rules).
+
+## Example 2: STREAM with CPU and memory on different NUMA nodes
+
+This example runs STREAM in two Pods. In `stream-remote`, CPUs are on node 0 and memory is on node 1. In `stream-local`, both are on node 0. Comparing their Triad bandwidth shows the cost of the split placement. It uses the same two-node machine as Showcase 1, where node 0 has three exclusive CPUs (1-3). Run one Pod at a time so both get the same CPUs.
+
+### Prepare the source and the host tools
+
+Run these on the host:
+
+```bash
+sudo apt-get install -y numactl          # provides numastat
+curl -fsSLO https://www.cs.virginia.edu/stream/FTP/Code/stream.c
+sha256sum stream.c
+# a52bae5e175bea3f7832112af9c085adab47117f7d2ce219165379849231692b  (STREAM 5.10)
+```
+
+### Create the split-placement Pod
+
+```bash
+cat > stream-remote.yaml <<'EOF'
+apiVersion: v1
+kind: Pod
+metadata:
+  name: stream-remote
+spec:
+  nodeName: ubuntu-numa-test        # your node name
+  cpuNUMA: 0
+  memNUMA: 1
+  containers:
+    - name: stream
+      image: gcc:14.2.0-bookworm
+      command: ["sleep", "infinity"]
+      resources:
+        requests: {cpu: "3", memory: 1Gi}
+        limits:   {cpu: "3", memory: 1Gi}
+EOF
+
+kubectl apply -f stream-remote.yaml
+kubectl wait --for=condition=Ready pod/stream-remote --timeout=600s
+kubectl exec stream-remote -- grep -E 'Cpus_allowed_list|Mems_allowed_list' /proc/self/status
+# Cpus_allowed_list:  1-3
+# Mems_allowed_list:  1
+```
+
+The memory node must have 1 GiB free on its own, and it does here. Three arrays of 20,000,000 doubles take 480 MB, so 1 GiB leaves room for the compiler and process overhead. Choose an array size of at least 4 times the last-level cache of the CPUs you use.
+
+### Build and run STREAM
+
+```bash
+kubectl cp stream.c stream-remote:/tmp/stream.c
+
+kubectl exec stream-remote -- gcc -O3 -fopenmp \
+  -DSTREAM_ARRAY_SIZE=20000000 -DNTIMES=200 /tmp/stream.c -o /tmp/stream
+
+kubectl exec stream-remote -- env OMP_NUM_THREADS=3 OMP_PROC_BIND=true /tmp/stream \
+  | tee stream-remote.txt
+```
+
+With `NTIMES=200`, the run lasts long enough (tens of seconds) to do the checks below from a second terminal.
+
+### Verify while STREAM is running
+
+Run these on the host, in a second terminal:
+
+```bash
+PID=$(pgrep -x stream)
+
+# CPU affinity: only node 0 CPUs
+taskset -cp $PID
+
+# Memory policy: only node 1
+grep -E 'Cpus_allowed_list|Mems_allowed_list' /proc/$PID/status
+
+# Which CPU each OpenMP thread is running on (PSR column)
+ps -L -o tid,psr,comm -p $PID
+
+# Where the process's memory actually lives, per NUMA node (MB)
+sudo numastat -p $PID
+```
+
+Expected results:
+
+- `taskset` reports `1-3`, and every thread's `PSR` is 1, 2 or 3.
+- `Mems_allowed_list` is `1`.
+- In `numastat -p`, nearly all of the about 458 MiB (480 MB) taken by the three arrays is in the `Node 1` column of the `Private` / `Total` rows. `Node 0` shows only a few MB of shared libraries and page cache.
+
+### Verify the result
+
+```bash
+grep -E '^(Copy|Scale|Add|Triad)|Solution Validates' stream-remote.txt
+```
+
+The output has to contain `Solution Validates: avg error less than 1.000000e-13 on all three arrays`. If it doesn't, the bandwidth numbers can't be used.
+
+### Compare with local placement
+
+Delete the split Pod, then run the same steps in a Pod that keeps memory on node 0:
+
+```bash
+kubectl delete pod stream-remote --wait=true
+
+sed -e 's/stream-remote/stream-local/' -e 's/memNUMA: 1/memNUMA: 0/' \
+  stream-remote.yaml > stream-local.yaml
+kubectl apply -f stream-local.yaml
+kubectl wait --for=condition=Ready pod/stream-local --timeout=600s
+
+kubectl cp stream.c stream-local:/tmp/stream.c
+kubectl exec stream-local -- gcc -O3 -fopenmp \
+  -DSTREAM_ARRAY_SIZE=20000000 -DNTIMES=200 /tmp/stream.c -o /tmp/stream
+kubectl exec stream-local -- env OMP_NUM_THREADS=3 OMP_PROC_BIND=true /tmp/stream \
+  | tee stream-local.txt
+
+# while it runs, on the host: Node 0 should now hold the arrays
+sudo numastat -p $(pgrep -x stream)
+
+grep -H Triad stream-remote.txt stream-local.txt
+kubectl delete pod stream-local
+```
+
+On physical hardware with real NUMA, `stream-local` may show the higher Triad rate. To test HBM, set `memNUMA` to the HBM node and compare again. In a VM, both guest NUMA nodes may be backed by the same host memory, so the rates can be about equal even though placement is correct. In that case, rely on `numastat`, not bandwidth, to confirm placement. For a fair comparison, use the same CPU set, keep the host idle, and run each configuration several times.
+
+
+
+## AI Usage Declaration
+
+GPT-6 Astra, GPT-6.1 Sol, and Claude Opus 5.5 were used to implement this feature.
+
+

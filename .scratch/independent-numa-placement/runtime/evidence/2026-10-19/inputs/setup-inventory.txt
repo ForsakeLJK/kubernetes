@@ -1,0 +1,46 @@
+=== Operating system ===
+PRETTY_NAME="Ubuntu 26.04.1 LTS"
+NAME="Ubuntu"
+VERSION_ID="26.04"
+VERSION="26.04.1 LTS (Resolute Raccoon)"
+VERSION_CODENAME=resolute
+ID=ubuntu
+ID_LIKE=debian
+HOME_URL="https://www.ubuntu.com/"
+SUPPORT_URL="https://help.ubuntu.com/"
+BUG_REPORT_URL="https://bugs.launchpad.net/ubuntu/"
+PRIVACY_POLICY_URL="https://www.ubuntu.com/legal/terms-and-policies/privacy-policy"
+UBUNTU_CODENAME=resolute
+LOGO=ubuntu-logo
+=== Available tools ===
+/usr/bin/git
+/usr/bin/make
+/usr/bin/gcc
+/usr/bin/python3
+/usr/bin/containerd
+/usr/bin/ctr
+/usr/sbin/runc
+Command 'go' not found, but can be installed with:
+sudo apt install golang-go  # version 2:1.26~1, or
+sudo apt install gccgo-go   # version 2:1.26~1
+Python 3.14.4
+=== Running components ===
+   1234 containerd
+=== Installed services ===
+containerd.service                           enabled         enabled
+=== Existing binaries and source checkouts ===
+/home/jukeliu/k8s_workspace/kubernetes/_output/local/go/bin/kubelet
+/home/jukeliu/k8s_workspace/kubernetes/_output/local/go/bin/kube-apiserver
+/home/jukeliu/k8s_workspace/kubernetes/_output/local/go/bin/kubectl
+/home/jukeliu/k8s_workspace/kubernetes/_output/local/bin/linux/arm64/kubelet
+/home/jukeliu/k8s_workspace/kubernetes/_output/local/bin/linux/arm64/kube-apiserver
+/home/jukeliu/k8s_workspace/kubernetes/_output/local/bin/linux/arm64/kubectl
+/home/jukeliu/k8s_workspace/kubernetes/hack/local-up-cluster.sh
+=== Existing state directories ===
+ls: cannot access '/etc/kubernetes': No such file or directory
+srw-rw----  1 root root    0 Oct 19 10:50 /run/containerd/containerd.sock
+drwx------ 14 root root 4096 Oct  1 10:44 /var/lib/containerd
+drwxr-xr-x 11 root root 4096 Oct  1 10:47 /var/lib/kubelet
+=== Swap ===
+NAME      TYPE SIZE USED PRIO
+/swap.img file   4G   0B   -1

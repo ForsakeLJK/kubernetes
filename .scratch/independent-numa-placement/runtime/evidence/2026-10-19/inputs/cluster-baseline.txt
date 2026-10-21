@@ -1,0 +1,9 @@
+Command 'kubectl' not found, did you mean:
+  command 'kubectx' from deb kubectx (0.9.5-2build1)
+Try: sudo apt install <deb name>
+Command 'kubectl' not found, did you mean:
+  command 'kubectx' from deb kubectx (0.9.5-2build1)
+Try: sudo apt install <deb name>
+sudo: 'crictl': command not found
+No files found for kubelet.service.
+Unit kubelet.service could not be found.

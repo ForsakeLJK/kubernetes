@@ -39,18 +39,25 @@ p = pathlib.Path('/evidence')
 c = json.loads(sys.argv[1])
 (p/'node-cpus.txt').write_text(pathlib.Path('/sys/devices/system/node/node%d/cpulist' % c['cpu_node']).read_text())
 cpus = __import__('os').sched_getaffinity(0)
-caches = {}
+caches, cache_errors = {}, []
 for cpu in cpus:
-    indices = list(pathlib.Path('/sys/devices/system/cpu/cpu%d/cache' % cpu).glob('index*'))
-    last = max(int((i/'level').read_text()) for i in indices)
-    for i in indices:
-        if int((i/'level').read_text()) == last and (i/'type').read_text().strip() in ('Unified', 'Data'):
-            shared = (i/'shared_cpu_list').read_text().strip()
-            size = (i/'size').read_text().strip()
-            caches[shared] = int(size[:-1]) * {'K':1024, 'M':1048576, 'G':1073741824}[size[-1]]
+    try:
+        indices = list(pathlib.Path('/sys/devices/system/cpu/cpu%d/cache' % cpu).glob('index*'))
+        usable = [i for i in indices if (i/'type').read_text().strip() in ('Unified', 'Data')]
+        last = max(int((i/'level').read_text()) for i in usable)
+        for i in usable:
+            if int((i/'level').read_text()) == last:
+                shared = (i/'shared_cpu_list').read_text().strip()
+                size = (i/'size').read_text().strip()
+                amount = int(size[:-1]) * {'K':1024, 'M':1048576, 'G':1073741824}[size[-1]]
+                if amount <= 0:
+                    raise ValueError('nonpositive cache size')
+                caches[shared] = amount
+    except (OSError, ValueError, KeyError, IndexError) as error:
+        cache_errors.append({'cpu':cpu, 'error':str(error)})
 topology = {n.name+'/'+f.name: f.read_text() for n in pathlib.Path('/sys/devices/system/node').glob('node[0-9]*')
             for f in n.iterdir() if f.name in ('cpulist', 'meminfo', 'distance')}
-(p/'host.json').write_text(json.dumps({'llc_bytes':sum(caches.values()), 'caches':caches,
+(p/'host.json').write_text(json.dumps({'llc_bytes':None if cache_errors else sum(caches.values()), 'caches':caches, 'cache_errors':cache_errors,
     'kernel':__import__('platform').platform(), 'topology':topology}))
 code = subprocess.call(c['argv'])
 tmp = p/'execution.json.tmp'
@@ -80,6 +87,8 @@ def validated(c: dict[str, Any]) -> dict[str, Any]:
               'observe_seconds': (0, 3600), 'residency_samples': (1, 1000000),
               'timeout': (1, 86400)}
     for name, (low, high) in bounds.items():
+        if name == 'llc_bytes' and c['mode'] == 'smoke' and c[name] is None:
+            continue
         if type(c[name]) is not int or not low <= c[name] <= high:
             raise ValueError(f'{name} must be an integer in {low}..{high}')
     if c['timeout'] <= c['observe_seconds']:
@@ -120,7 +129,8 @@ def workload(c: dict[str, Any], threads: int) -> list[str]:
     for flag, key in [('array-size', 'array_size'), ('iterations', 'iterations'),
                       ('observe-seconds', 'observe_seconds'), ('residency-samples', 'residency_samples'),
                       ('timeout', 'timeout'), ('mode', 'mode'), ('llc-bytes', 'llc_bytes')]:
-        argv += ['--'+flag, str(c[key])]
+        if c[key] is not None:
+            argv += ['--'+flag, str(c[key])]
     return argv + ['--threads', str(threads)] + ['--cflag='+f for f in c['cflags']]
 
 

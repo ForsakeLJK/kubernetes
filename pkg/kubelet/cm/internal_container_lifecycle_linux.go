@@ -37,7 +37,7 @@ func (i *internalContainerLifecycleImpl) PreCreateContainer(logger klog.Logger, 
 	placement := topologymanager.ResolveNUMAPlacement(pod)
 	if placement.Required {
 		if i.cpuManager == nil || i.memoryManager == nil {
-			return fmt.Errorf("NUMA node %d requires CPU and memory managers", placement.CPU)
+			return fmt.Errorf("%s requires the kubelet CPU and Memory managers to be enabled", placement)
 		}
 		cpuValidator, cpuOK := i.cpuManager.(interface {
 			ValidateNUMAPlacement(*v1.Pod, *v1.Container) error
@@ -46,7 +46,7 @@ func (i *internalContainerLifecycleImpl) PreCreateContainer(logger klog.Logger, 
 			ValidateNUMAPlacement(*v1.Pod, *v1.Container) error
 		})
 		if !cpuOK || !memoryOK {
-			return fmt.Errorf("NUMA node %d requires CPU and memory placement validation", placement.CPU)
+			return fmt.Errorf("%s requires CPU and Memory managers that support NUMA placement validation", placement)
 		}
 		if err := cpuValidator.ValidateNUMAPlacement(pod, container); err != nil {
 			return err

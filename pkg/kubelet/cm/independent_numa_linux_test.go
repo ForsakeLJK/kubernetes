@@ -111,7 +111,7 @@ func TestIndependentNUMAAllocationAndRuntimeMasks(t *testing.T) {
 			}{
 				{name: "CPU-only common node", cpu: "1", memory: "1Gi", cpuTarget: ptr.To[int32](0)},
 				{name: "CPU-only CPU-less nearest directed", cpu: "1", memory: "1Gi", cpuTarget: ptr.To[int32](2), wantMemory: "3", memoryCapacity: map[int]uint64{2: gib}, distances: map[int][]uint64{0: {10, 11, 20}, 2: {40, 10, 20}, 3: {20, 60, 10}}},
-				{name: "CPU-only common node with optional closest flag", cpu: "1", memory: "1Gi", cpuTarget: ptr.To[int32](2), wantMemory: "2", preferClosest: true},
+				{name: "CPU-only common node with optional closest flag", cpu: "1", memory: "1Gi", cpuTarget: ptr.To[int32](2), wantMemory: "2", preferClosest: true, distances: map[int][]uint64{0: {10, 20, 30}, 2: {20, 10, 30}, 3: {30, 30, 10}}},
 				{name: "CPU-only sole feasible memory without distances", cpu: "1", memory: "5Gi", cpuTarget: ptr.To[int32](2)},
 				{name: "CPU-only cannot aggregate memory", cpu: "1", memory: "8Gi", cpuTarget: ptr.To[int32](2), wantFailure: "no feasible singleton memory"},
 				{name: "CPU-only CPU shortage", cpu: "5", memory: "1Gi", cpuTarget: ptr.To[int32](2), wantFailure: "CPUs"},
@@ -133,7 +133,7 @@ func TestIndependentNUMAAllocationAndRuntimeMasks(t *testing.T) {
 				{name: "CPU-only conflicting multi-node memory checkpoint", cpu: "1", memory: "1Gi", cpuTarget: ptr.To[int32](2), wantMemory: "3", memoryCapacity: map[int]uint64{2: gib}, distances: map[int][]uint64{2: {40, 10, 20}}, conflictingMemory: true},
 
 				{name: "memory-only common node", cpu: "1", memory: "1Gi", memoryTarget: ptr.To[int32](0)},
-				{name: "memory-only common node with optional closest flag", cpu: "1", memory: "1Gi", memoryTarget: ptr.To[int32](0), preferClosest: true},
+				{name: "memory-only common node with optional closest flag", cpu: "1", memory: "1Gi", memoryTarget: ptr.To[int32](0), preferClosest: true, distances: map[int][]uint64{0: {10, 20, 30}, 2: {20, 10, 30}, 3: {30, 30, 10}}},
 				{name: "memory-only common node infeasible selects sole candidate", cpu: "5", memory: "1Gi", memoryTarget: ptr.To[int32](2), wantCPU: "1-5"},
 				{name: "memory-only conflicting multi-node CPU checkpoint", cpu: "2", memory: "1Gi", memoryTarget: ptr.To[int32](0), wantCPU: "1-2", conflictingCPU: true},
 				{name: "memory-only memory shortage", cpu: "1", memory: "3Gi", memoryTarget: ptr.To[int32](3), wantFailure: "ordinary memory"},
@@ -145,6 +145,7 @@ func TestIndependentNUMAAllocationAndRuntimeMasks(t *testing.T) {
 				{name: "memory-only unknown candidate cannot be discarded", cpu: "1", memory: "1Gi", memoryTarget: ptr.To[int32](3), distances: map[int][]uint64{2: {20, 10, 30}}, wantFailure: "distance"},
 				{name: "memory-only truncated row", cpu: "1", memory: "1Gi", memoryTarget: ptr.To[int32](3), distances: map[int][]uint64{0: {10, 20}, 2: {20, 10, 30}}, wantFailure: "distance"},
 				{name: "memory-only padded raw-ID row ambiguous", cpu: "1", memory: "1Gi", memoryTarget: ptr.To[int32](3), distances: map[int][]uint64{0: {10, 0, 20, 30}, 2: {20, 0, 10, 30}}, wantFailure: "distance"},
+				{name: "memory-only unrelated malformed column ignored", cpu: "1", memory: "1Gi", memoryTarget: ptr.To[int32](3), wantCPU: "8", distances: map[int][]uint64{0: {10, 0, 40}, 2: {255, 10, 30}}},
 				{name: "memory-only zero distance", cpu: "1", memory: "1Gi", memoryTarget: ptr.To[int32](3), distances: map[int][]uint64{0: {10, 20, 0}, 2: {20, 10, 30}}, wantFailure: "distance"},
 				{name: "memory-only unreachable distance", cpu: "1", memory: "1Gi", memoryTarget: ptr.To[int32](3), distances: map[int][]uint64{0: {10, 20, 255}, 2: {20, 10, 30}}, wantFailure: "distance"},
 				{name: "memory-only invalid local distance", cpu: "1", memory: "1Gi", memoryTarget: ptr.To[int32](3), distances: map[int][]uint64{0: {20, 20, 30}, 2: {20, 10, 30}}, wantFailure: "distance"},

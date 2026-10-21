@@ -1,0 +1,96 @@
+=== Source commit ===
+b76f73a6f478ef3ed63cdf58bcb295dfcec1013b
+=== Binary versions ===
+Kubernetes v0.0.0-master+$Format:%H$
+Kubernetes v0.0.0-master+$Format:%H$
+Client Version: v0.0.0-master+$Format:%H$
+Kustomize Version: v5.8.1
+=== Container runtime ===
+containerd github.com/containerd/containerd/v2 2.2.2 
+TYPE                                      ID                       PLATFORMS         STATUS    
+io.containerd.content.v1                  content                  -                 ok        
+io.containerd.image-verifier.v1           bindir                   -                 ok        
+io.containerd.internal.v1                 opt                      -                 ok        
+io.containerd.warning.v1                  deprecations             -                 ok        
+io.containerd.mount-handler.v1            erofs                    linux/arm64/v8    ok        
+io.containerd.snapshotter.v1              blockfile                linux/arm64/v8    skip      
+io.containerd.snapshotter.v1              btrfs                    linux/arm64/v8    skip      
+io.containerd.snapshotter.v1              devmapper                linux/arm64/v8    skip      
+io.containerd.snapshotter.v1              erofs                    linux/arm64/v8    skip      
+io.containerd.snapshotter.v1              native                   linux/arm64/v8    ok        
+io.containerd.snapshotter.v1              overlayfs                linux/arm64/v8    ok        
+io.containerd.snapshotter.v1              zfs                      linux/arm64/v8    skip      
+io.containerd.event.v1                    exchange                 -                 ok        
+io.containerd.monitor.task.v1             cgroups                  linux/arm64/v8    ok        
+io.containerd.metadata.v1                 bolt                     -                 ok        
+io.containerd.gc.v1                       scheduler                -                 ok        
+io.containerd.nri.v1                      nri                      -                 ok        
+io.containerd.differ.v1                   erofs                    -                 skip      
+io.containerd.differ.v1                   walking                  linux/arm64/v8    ok        
+io.containerd.lease.v1                    manager                  -                 ok        
+io.containerd.mount-manager.v1            bolt                     -                 ok        
+io.containerd.service.v1                  containers-service       -                 ok        
+io.containerd.service.v1                  content-service          -                 ok        
+io.containerd.service.v1                  diff-service             -                 ok        
+io.containerd.service.v1                  images-service           -                 ok        
+io.containerd.service.v1                  introspection-service    -                 ok        
+io.containerd.service.v1                  namespaces-service       -                 ok        
+io.containerd.service.v1                  snapshots-service        -                 ok        
+io.containerd.shim.v1                     manager                  -                 ok        
+io.containerd.runtime.v2                  task                     linux/arm64/v8    ok        
+io.containerd.service.v1                  tasks-service            -                 ok        
+io.containerd.grpc.v1                     containers               -                 ok        
+io.containerd.grpc.v1                     content                  -                 ok        
+io.containerd.grpc.v1                     diff                     -                 ok        
+io.containerd.grpc.v1                     events                   -                 ok        
+io.containerd.grpc.v1                     images                   -                 ok        
+io.containerd.grpc.v1                     introspection            -                 ok        
+io.containerd.grpc.v1                     leases                   -                 ok        
+io.containerd.grpc.v1                     mounts                   -                 ok        
+io.containerd.grpc.v1                     namespaces               -                 ok        
+io.containerd.sandbox.store.v1            local                    -                 ok        
+io.containerd.transfer.v1                 local                    -                 ok        
+io.containerd.cri.v1                      images                   -                 ok        
+io.containerd.cri.v1                      runtime                  linux/arm64/v8    ok        
+io.containerd.podsandbox.controller.v1    podsandbox               -                 ok        
+io.containerd.sandbox.controller.v1       shim                     -                 ok        
+io.containerd.grpc.v1                     sandbox-controllers      -                 ok        
+io.containerd.grpc.v1                     sandboxes                -                 ok        
+io.containerd.grpc.v1                     snapshots                -                 ok        
+io.containerd.streaming.v1                manager                  -                 ok        
+io.containerd.grpc.v1                     streaming                -                 ok        
+io.containerd.grpc.v1                     tasks                    -                 ok        
+io.containerd.grpc.v1                     transfer                 -                 ok        
+io.containerd.grpc.v1                     version                  -                 ok        
+io.containerd.monitor.container.v1        restart                  -                 ok        
+io.containerd.tracing.processor.v1        otlp                     -                 skip      
+io.containerd.internal.v1                 tracing                  -                 skip      
+io.containerd.ttrpc.v1                    otelttrpc                -                 ok        
+io.containerd.grpc.v1                     healthcheck              -                 ok        
+io.containerd.grpc.v1                     cri                      -                 ok        
+=== Relevant runtime configuration ===
+disabled_plugins = []
+          cni_conf_dir = ''
+            SystemdCgroup = true
+      bin_dir = ''
+      bin_dirs = ['/opt/cni/bin']
+      conf_dir = '/etc/cni/net.d'
+    bin_dir = '/opt/containerd/image-verifier/bin'
+=== Container networking ===
+/etc/cni/net.d:
+total 12
+drwx------ 2 root root 4096 Oct  1 10:32 .
+drwxr-xr-x 3 root root 4096 Oct  1 10:12 ..
+-rw-r--r-- 1 root root  544 Oct  1 10:32 10-containerd-net.conflist
+
+/opt/cni/bin:
+total 18384
+drwxr-xr-x 2 root root    4096 Oct  1 10:32 .
+drwxr-xr-x 3 root root    4096 Oct  1 10:32 ..
+-rwxr-xr-x 1 root root 4266647 Mar 16  2026 host-local
+-rwxr-xr-x 1 root root 4253055 Mar 16  2026 loopback
+-rwxr-xr-x 1 root root 4993766 Mar 16  2026 portmap
+-rwxr-xr-x 1 root root 5294994 Mar 16  2026 ptp
+=== Existing etcd binary ===
+-rwxr-xr-x 1 jukeliu jukeliu 23134370 Jul 23 19:32 /home/jukeliu/k8s_workspace/kubernetes/third_party/etcd/etcd
+

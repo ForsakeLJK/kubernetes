@@ -81,7 +81,7 @@ func (s *podScope) admitUsingContainerResources(ctx context.Context, pod *v1.Pod
 	var admit bool
 	if placement.Required {
 		if operation != lifecycle.AddOperation {
-			return admission.GetPodAdmitResult(numaPlacementError{fmt.Sprintf("NUMA node %d does not support in-place resource resize; replace the Pod", placement.CPU)})
+			return admission.GetPodAdmitResult(numaPlacementError{fmt.Sprintf("%s does not support in-place resource resize; delete and recreate the Pod with the new resources", placement)})
 		}
 		for _, container := range append(pod.Spec.InitContainers, pod.Spec.Containers...) {
 			for _, provider := range s.hintProviders {
@@ -456,7 +456,13 @@ func (s *podScope) updateSuccessMetrics(logger klog.Logger, pod *v1.Pod) {
 // only concrete singleton placement shared by both resources and every container.
 func (s *podScope) hasCommonNUMAPlacement(logger klog.Logger, pod *v1.Pod) bool {
 	var common sets.Set[int]
+	independent := ResolveNUMAPlacement(pod).Independent
 	for _, container := range append(pod.Spec.InitContainers, pod.Spec.Containers...) {
+		if independent && NUMAInitContainerCompleted(pod, &container) {
+			// Recovery skips released init assignments, so they would report
+			// the shared pool rather than the placement the Pod actually holds.
+			continue
+		}
 		cpuNodes, memoryNodes := sets.New[int](), sets.New[int]()
 		for _, provider := range s.hintProviders {
 			if cpu, ok := provider.(interface {

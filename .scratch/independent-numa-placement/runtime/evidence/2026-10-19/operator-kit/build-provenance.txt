@@ -1,0 +1,97 @@
+Source commit: b76f73a6f478ef3ed63cdf58bcb295dfcec1013b
+=== kube-apiserver ===
+/Users/jukeliu/ra_workspace/numa_support_kubernetes/kubernetes/_output/local/bin/linux/arm64/kube-apiserver: go1.27.1
+	path	k8s.io/kubernetes/cmd/kube-apiserver
+	mod	k8s.io/kubernetes	v0.0.0-20261015073621-b76f73a6f478	
+	build	-buildmode=exe
+	build	-compiler=gc
+	build	-tags=selinux,notest,grpcnotrace
+	build	-trimpath=true
+	build	CGO_ENABLED=0
+	build	GOARCH=arm64
+	build	GOOS=linux
+	build	GOARM64=v8.0
+	build	vcs=git
+	build	vcs.revision=b76f73a6f478ef3ed63cdf58bcb295dfcec1013b
+	build	vcs.time=2026-10-15T07:36:21Z
+	build	vcs.modified=false
+=== kubelet ===
+/Users/jukeliu/ra_workspace/numa_support_kubernetes/kubernetes/_output/local/bin/linux/arm64/kubelet: go1.27.1
+	path	k8s.io/kubernetes/cmd/kubelet
+	mod	k8s.io/kubernetes	v0.0.0-20261015073621-b76f73a6f478	
+	build	-buildmode=exe
+	build	-compiler=gc
+	build	-tags=selinux,notest,grpcnotrace
+	build	-trimpath=true
+	build	CGO_ENABLED=0
+	build	GOARCH=arm64
+	build	GOOS=linux
+	build	GOARM64=v8.0
+	build	vcs=git
+	build	vcs.revision=b76f73a6f478ef3ed63cdf58bcb295dfcec1013b
+	build	vcs.time=2026-10-15T07:36:21Z
+	build	vcs.modified=false
+=== kubectl ===
+/Users/jukeliu/ra_workspace/numa_support_kubernetes/kubernetes/_output/local/bin/linux/arm64/kubectl: go1.27.1
+	path	k8s.io/kubernetes/cmd/kubectl
+	mod	k8s.io/kubernetes	v0.0.0-20261015073621-b76f73a6f478	
+	build	-buildmode=exe
+	build	-compiler=gc
+	build	-tags=selinux,notest,grpcnotrace
+	build	-trimpath=true
+	build	CGO_ENABLED=0
+	build	GOARCH=arm64
+	build	GOOS=linux
+	build	GOARM64=v8.0
+	build	vcs=git
+	build	vcs.revision=b76f73a6f478ef3ed63cdf58bcb295dfcec1013b
+	build	vcs.time=2026-10-15T07:36:21Z
+	build	vcs.modified=false
+=== kube-controller-manager ===
+/Users/jukeliu/ra_workspace/numa_support_kubernetes/kubernetes/_output/local/bin/linux/arm64/kube-controller-manager: go1.27.1
+	path	k8s.io/kubernetes/cmd/kube-controller-manager
+	mod	k8s.io/kubernetes	v0.0.0-20261015073621-b76f73a6f478	
+	build	-buildmode=exe
+	build	-compiler=gc
+	build	-tags=selinux,notest,grpcnotrace
+	build	-trimpath=true
+	build	CGO_ENABLED=0
+	build	GOARCH=arm64
+	build	GOOS=linux
+	build	GOARM64=v8.0
+	build	vcs=git
+	build	vcs.revision=b76f73a6f478ef3ed63cdf58bcb295dfcec1013b
+	build	vcs.time=2026-10-15T07:36:21Z
+	build	vcs.modified=false
+=== kube-scheduler ===
+/Users/jukeliu/ra_workspace/numa_support_kubernetes/kubernetes/_output/local/bin/linux/arm64/kube-scheduler: go1.27.1
+	path	k8s.io/kubernetes/cmd/kube-scheduler
+	mod	k8s.io/kubernetes	v0.0.0-20261015073621-b76f73a6f478	
+	build	-buildmode=exe
+	build	-compiler=gc
+	build	-tags=selinux,notest,grpcnotrace
+	build	-trimpath=true
+	build	CGO_ENABLED=0
+	build	GOARCH=arm64
+	build	GOOS=linux
+	build	GOARM64=v8.0
+	build	vcs=git
+	build	vcs.revision=b76f73a6f478ef3ed63cdf58bcb295dfcec1013b
+	build	vcs.time=2026-10-15T07:36:21Z
+	build	vcs.modified=false
+=== kube-proxy ===
+/Users/jukeliu/ra_workspace/numa_support_kubernetes/kubernetes/_output/local/bin/linux/arm64/kube-proxy: go1.27.1
+	path	k8s.io/kubernetes/cmd/kube-proxy
+	mod	k8s.io/kubernetes	v0.0.0-20261015073621-b76f73a6f478	
+	build	-buildmode=exe
+	build	-compiler=gc
+	build	-tags=selinux,notest,grpcnotrace
+	build	-trimpath=true
+	build	CGO_ENABLED=0
+	build	GOARCH=arm64
+	build	GOOS=linux
+	build	GOARM64=v8.0
+	build	vcs=git
+	build	vcs.revision=b76f73a6f478ef3ed63cdf58bcb295dfcec1013b
+	build	vcs.time=2026-10-15T07:36:21Z
+	build	vcs.modified=false

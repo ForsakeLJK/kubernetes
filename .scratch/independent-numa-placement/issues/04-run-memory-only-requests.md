@@ -46,3 +46,14 @@ findings. The full suite reports 145 failures in 11 package groups, with every
 failure name present in earlier ticket records; ancillary suites pass. See
 [verification-04.md](../verification-04.md) for commands, evidence, and limits.
 No Linux VM/hardware runtime or performance result is claimed.
+
+## Post-resolution correction (2026-10-19)
+
+A post-milestone Spec review found the distance decoder stricter than "Refuse
+when ... relevant distances are unusable or missing": one malformed column for
+an unrelated node blocked ranking. Ranking now requires a valid row shape, the
+local anchor and the compared CPU-to-memory column only. Separately,
+independent-numa no longer suppresses the existing `prefer-closest-numa-nodes`
+startup refusal when distances are missing; the new policy still loads without
+that option. Ticket 05 inherits the decoder fix. See
+[verification-review-corrections.md](../verification-review-corrections.md).

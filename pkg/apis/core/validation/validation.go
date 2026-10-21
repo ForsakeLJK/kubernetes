@@ -4913,9 +4913,9 @@ func validatePodNUMAPlacement(spec *core.PodSpec, fldPath *field.Path) field.Err
 		return nil
 	}
 	var allErrs field.ErrorList
-	for name, id := range map[string]*int32{"numaNode": spec.NUMANode, "cpuNUMA": spec.CPUNUMA, "memNUMA": spec.MemNUMA} {
-		if id != nil && (*id < 0 || *id > 63) {
-			allErrs = append(allErrs, field.Invalid(fldPath.Child(name), *id, "must be between 0 and 63"))
+	for _, f := range podNUMAFields(spec) {
+		if f.id != nil && (*f.id < 0 || *f.id > 63) {
+			allErrs = append(allErrs, field.Invalid(fldPath.Child(f.name), *f.id, "must be between 0 and 63"))
 		}
 	}
 	if spec.NUMANode != nil && (spec.CPUNUMA != nil || spec.MemNUMA != nil) {
@@ -4965,6 +4965,16 @@ func numaPodResourcesChanged(newPod, oldPod *core.Pod) bool {
 		return false
 	}
 	return changed(newPod.Spec.Containers, oldPod.Spec.Containers) || changed(newPod.Spec.InitContainers, oldPod.Spec.InitContainers)
+}
+
+type podNUMAField struct {
+	name string
+	id   *int32
+}
+
+// podNUMAFields fixes the field order so multi-field errors are deterministic.
+func podNUMAFields(spec *core.PodSpec) []podNUMAField {
+	return []podNUMAField{{"numaNode", spec.NUMANode}, {"cpuNUMA", spec.CPUNUMA}, {"memNUMA", spec.MemNUMA}}
 }
 
 func hasPodNUMAPlacement(spec *core.PodSpec) bool {
@@ -5113,9 +5123,9 @@ func validateLinux(spec *core.PodSpec, fldPath *field.Path) field.ErrorList {
 
 func validateWindows(spec *core.PodSpec, fldPath *field.Path) field.ErrorList {
 	allErrs := field.ErrorList{}
-	for name, id := range map[string]*int32{"numaNode": spec.NUMANode, "cpuNUMA": spec.CPUNUMA, "memNUMA": spec.MemNUMA} {
-		if id != nil {
-			allErrs = append(allErrs, field.Forbidden(fldPath.Child(name), name+" requires a Linux Pod"))
+	for _, f := range podNUMAFields(spec) {
+		if f.id != nil {
+			allErrs = append(allErrs, field.Forbidden(fldPath.Child(f.name), f.name+" requires a Linux Pod"))
 		}
 	}
 	securityContext := spec.SecurityContext

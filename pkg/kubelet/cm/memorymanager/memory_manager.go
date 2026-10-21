@@ -343,7 +343,7 @@ func (m *manager) checkNUMAPlacement(pod *v1.Pod, container *v1.Container) error
 		return nil
 	}
 	if len(blocks) == 0 {
-		return fmt.Errorf("memory assignment conflicts with requested NUMA node %d: no memory blocks", placement.Memory)
+		return fmt.Errorf("memory assignment conflicts with %s: container %s has no memory blocks", placement.MemoryTarget(), container.Name)
 	}
 	if placement.Memory == -1 {
 		if len(blocks[0].NUMAAffinity) != 1 {
@@ -570,7 +570,7 @@ func (m *manager) ValidateNUMAPlacement(pod *v1.Pod, container *v1.Container) er
 	defer m.Unlock()
 	blocks := m.state.GetMemoryBlocks(string(pod.UID), container.Name)
 	if len(blocks) == 0 {
-		return fmt.Errorf("memory allocation for requested NUMA node %d is missing", placement.Memory)
+		return fmt.Errorf("memory allocation for %s is missing for container %s; the Pod must be re-admitted", placement.MemoryTarget(), container.Name)
 	}
 	if err := m.checkNUMAPlacement(pod, container); err != nil {
 		return err

@@ -43,7 +43,9 @@ func newNUMAInfo(topology []cadvisorapi.Node, opts PolicyOptions, independent bo
 		numaNodes = append(numaNodes, node.Id)
 
 		var nodeDistance []uint64
-		if opts.PreferClosestNUMA && !independent {
+		// The option keeps its startup contract under every policy; the
+		// independent planner's tolerance of missing distances is separate.
+		if opts.PreferClosestNUMA {
 			nodeDistance = node.Distances
 			if nodeDistance == nil {
 				if runtime.GOOS == "windows" {
@@ -107,20 +109,28 @@ func (n *NUMAInfo) cpuToMemoryDistance(cpu, memory int) (uint64, error) {
 	if len(row) != len(nodes) {
 		return 0, fmt.Errorf("NUMA node %d has %d distance columns, expected %d", cpu, len(row), len(nodes))
 	}
-	column := -1
+	local, column := -1, -1
 	for i, id := range nodes {
 		if id < 0 || id > 63 || i > 0 && id == nodes[i-1] {
 			return 0, fmt.Errorf("NUMA node IDs are invalid or ambiguous: %v", nodes)
 		}
-		if row[i] < 10 || row[i] >= 255 || id == cpu && row[i] != 10 {
-			return 0, fmt.Errorf("unusable NUMA distance from node %d to node %d: %d", cpu, id, row[i])
+		if id == cpu {
+			local = i
 		}
 		if id == memory {
 			column = i
 		}
 	}
-	if !slices.Contains(nodes, cpu) || column == -1 {
+	if local == -1 || column == -1 {
 		return 0, fmt.Errorf("NUMA pair (%d, %d) is absent from topology", cpu, memory)
+	}
+	// Only the row's local anchor and the compared pair are relevant. A bad
+	// column for an unrelated node must not block an otherwise rankable pair.
+	if row[local] != 10 {
+		return 0, fmt.Errorf("unusable NUMA distance from node %d to node %d: %d", cpu, cpu, row[local])
+	}
+	if row[column] < 10 || row[column] >= 255 {
+		return 0, fmt.Errorf("unusable NUMA distance from node %d to node %d: %d", cpu, memory, row[column])
 	}
 	return row[column], nil
 }

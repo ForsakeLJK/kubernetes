@@ -164,8 +164,15 @@ def assess(directory: Path, c: dict[str, Any], row: dict[str, Any], expected: di
             worker_cpus.append(thread['cpu'])
         require(len(set(worker_cpus)) == len(worker_cpus), 'workers oversubscribe the same CPU')
         host = load(wrapper/'host.json')
-        require(type(host['llc_bytes']) is int and 0 < host['llc_bytes'] <= c['llc_bytes'],
-                'actual allocated CPU LLC exceeds the recorded array-sizing budget')
+        if host['llc_bytes'] is None:
+            require(c['mode'] == 'smoke' and bool(host.get('cache_errors')),
+                    'unknown allocated CPU LLC requires smoke mode and discovery errors')
+        else:
+            require(type(host['llc_bytes']) is int and host['llc_bytes'] > 0,
+                    'invalid allocated CPU LLC')
+            if c['llc_bytes'] is not None:
+                require(host['llc_bytes'] <= c['llc_bytes'],
+                        'actual allocated CPU LLC exceeds the recorded array-sizing budget')
         residency_check(run, c['array_size'], target, c['residency_samples'], meta['pid'])
         env = meta['environment']
         require(env == {'OMP_NUM_THREADS':str(row['threads']), 'OMP_DYNAMIC':'FALSE', 'OMP_PROC_BIND':'close',

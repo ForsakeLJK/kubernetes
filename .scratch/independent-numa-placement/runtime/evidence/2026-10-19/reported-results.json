@@ -1,0 +1,211 @@
+{
+  "recorded_on": "2026-10-19",
+  "ticket": 11,
+  "status": "in progress; STREAM deferred by user",
+  "tested_fork_commit": "b76f73a6f478ef3ed63cdf58bcb295dfcec1013b",
+  "branch": "numa_support_hbm",
+  "operator": "jukeliu",
+  "guest_node": "ubuntu-numa-test",
+  "guest_run": "/home/jukeliu/numa-ticket11.5WO3NVwh",
+  "provenance": "Structured transcription of results supplied by the user in this chat; not the original VM raw archives. Script snapshots are the locally provided versions, not independently hashed copies from the VM.",
+  "batches": [
+    {
+      "name": "initial masks",
+      "status": "PASS",
+      "evidence": "Full checker output pasted by user",
+      "observed": [
+        {
+          "pod": "split-test",
+          "cpus": [
+            1
+          ],
+          "cpu_node": 0,
+          "memory_nodes": [
+            1
+          ]
+        },
+        {
+          "pod": "cpu-only-test",
+          "cpus": [
+            2
+          ],
+          "cpu_node": 0,
+          "memory_nodes": [
+            0
+          ]
+        },
+        {
+          "pod": "memory-only-test",
+          "cpus": [
+            5
+          ],
+          "cpu_node": 1,
+          "memory_nodes": [
+            1
+          ]
+        }
+      ]
+    },
+    {
+      "name": "post-update split masks",
+      "status": "PASS",
+      "observed_cpus": [
+        1
+      ],
+      "memory_nodes": [
+        1
+      ],
+      "scope": "Post-update masks only in that message; API outcomes subsequently covered by compatibility/API batch."
+    },
+    {
+      "name": "single-application container restart",
+      "status": "PASS",
+      "vm_evidence": "container-restart.9DmQmt",
+      "forms": [
+        "explicit",
+        "cpu-only",
+        "memory-only"
+      ],
+      "scope": "Each Pod UID retained; new container ID checked by runner; restart count 0 -> 1 and original masks retained."
+    },
+    {
+      "name": "explicit CPU shortage",
+      "status": "PASS",
+      "vm_evidence": "cpu-shortage.8AXMe5",
+      "reason": "NUMAPlacementFailed",
+      "message": "Pod was rejected: NUMA node 0 has insufficient eligible CPUs or incompatible CPU topology",
+      "requested_cpus": 2,
+      "cpu_node": 0,
+      "memory_node": 1,
+      "scope": "Single explicit request. Spare-node capacity inferred from the established allocations; raw before/after checkpoints remain on VM."
+    },
+    {
+      "name": "release and identical request retry",
+      "status": "PASS",
+      "vm_evidence_locator": "cpu-release-retry.*",
+      "deleted_pod": "cpu-only-test",
+      "deleted_pod_uid": "2ce36053-0b7a-40bd-804f-19af77557252",
+      "checkpoint_before_retry": {
+        "cpu": "deleted Pod absent",
+        "memory": {
+          "entries": {
+            "app": [
+              {
+                "numaAffinity": [
+                  0
+                ],
+                "type": "memory",
+                "size": 134217728
+              }
+            ]
+          }
+        }
+      },
+      "checkpoint_after_retry": {
+        "cpu": "deleted Pod absent",
+        "memory": "deleted Pod absent"
+      },
+      "replacement": {
+        "pod": "cpu-shortage",
+        "cpus": [
+          2,
+          3
+        ],
+        "cpu_node": 0,
+        "memory_nodes": [
+          1
+        ]
+      },
+      "surviving_pods": [
+        {
+          "pod": "split-test",
+          "cpus": [
+            1
+          ],
+          "memory_nodes": [
+            1
+          ]
+        },
+        {
+          "pod": "memory-only-test",
+          "cpus": [
+            5
+          ],
+          "memory_nodes": [
+            1
+          ]
+        }
+      ],
+      "scope": "Observed cleanup on subsequent admission and resource reuse, not immediate idle cleanup or partially allocated transaction rollback."
+    },
+    {
+      "name": "pod-wide masks",
+      "status": "PASS",
+      "reported_checks": 15,
+      "vm_evidence": "pod-wide.oRECj4",
+      "forms": [
+        "explicit",
+        "cpu-only",
+        "memory-only"
+      ],
+      "scope": "For each form, init and sidecar during gated init; app-a, app-b and sidecar after init release. Residency and restarts of these multi-container variants were not tested in this batch."
+    },
+    {
+      "name": "compatibility/API",
+      "status": "PASS",
+      "reported_counts": {
+        "PASS": 102,
+        "FAIL": 0,
+        "NOT RUN": 0
+      },
+      "vm_evidence_locator": "compatibility-api.*/results.json",
+      "evidence": "Aggregate summary supplied by user; raw per-check results not imported.",
+      "scope": "Runner includes equal/legacy/ordinary masks under independent-numa; all six forms before/after updates; field range/mixing and selected resource validation; immutability, unchanged-value and annotation updates; explicit resize/ephemeral dry-run rejection; absent CPU/memory node 63 admission refusal. Count includes setup and capture assertions."
+    },
+    {
+      "name": "private-anonymous residency",
+      "status": "PASS",
+      "reported_cases": 7,
+      "vm_evidence_locator": "page-residency.*/results.json",
+      "evidence": "User replied all passed to the seven-case runner; raw observations not imported.",
+      "forms": [
+        "explicit",
+        "reverse",
+        "cpu-only",
+        "memory-only",
+        "equal",
+        "legacy",
+        "ordinary"
+      ],
+      "bytes_per_case": 16777216,
+      "scope": "Existing query-only C probe, executed as PID 1; masks plus sampled touched private-anonymous mapping at the recorded instant, not all accessible pages or continuous residency."
+    },
+    {
+      "name": "kubelet checkpoint recovery",
+      "status": "PASS",
+      "reported_counts": {
+        "PASS": 22,
+        "FAIL": 0
+      },
+      "vm_evidence": "kubelet-recovery.j_t8qzp9",
+      "scope": "Three single-application forms, masks before/after kubelet restart, retained Pod UID and CPU/memory entries; forced new container starts after recovery and their masks. Does not cover init/sidecar recovery or residency across recovery."
+    }
+  ],
+  "operational_observations": [
+    "Initial node proxy configz request failed with BadRequest: address not allowed. Node Ready and workload exec tests still worked. No successful configz artifact supplied.",
+    "Release/retry helper timed out after 90 seconds waiting for both managers to clean while idle. Follow-up demonstrated CPU entry already removed and memory entry removed on next admission. Idle cleanup remains a separately scoped observation.",
+    "A later summary helper hit JSONDecodeError on an empty/invalid deleted-pod.json. It recovered the UID from the earlier cpu-only-test-pod.json. This parsing error is not a placement result.",
+    "STREAM setup timed out on kubectl get node. User reported likely closing the original cluster terminal. Control-plane loss is consistent with the foreground launcher lifecycle; actual process state and recovery were not verified.",
+    "User explicitly requested stopping STREAM work and updating progress; no STREAM run is confirmed started."
+  ],
+  "stream": {
+    "result": "NOT RUN",
+    "reason": "Deferred by user before a confirmed workload run; setup interrupted by API timeout.",
+    "image_build_import": "unconfirmed",
+    "llc_metadata": "not supplied",
+    "rates": null,
+    "ddr_hbm_comparison": false
+  },
+  "raw_vm_archive_imported": false,
+  "historical_records": "2026-10-13 user report of testing the earlier feature and the older dated runtime records are retained unchanged."
+}

@@ -1,0 +1,144 @@
+Mon Oct 19 10:52:42 AM UTC 2026
+Linux ubuntu-numa-test 7.0.0-34-generic #34-Ubuntu SMP PREEMPT_DYNAMIC Wed Sep  2 14:34:54 UTC 2026 aarch64 GNU/Linux
+Architecture:                            aarch64
+CPU op-mode(s):                          64-bit
+Byte Order:                              Little Endian
+CPU(s):                                  8
+On-line CPU(s) list:                     0-7
+Vendor ID:                               Apple
+Model name:                              -
+Model:                                   0
+Thread(s) per core:                      1
+Core(s) per socket:                      8
+Socket(s):                               1
+Stepping:                                0x0
+BogoMIPS:                                48.00
+Flags:                                   fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm jscvt fcma lrcpc dcpop sha3 asimddp sha512 asimdfhm dit uscat ilrcpc flagm sb paca pacg dcpodp flagm2 frint i8mm bf16 bti afp
+NUMA node(s):                            2
+NUMA node0 CPU(s):                       0-3
+NUMA node1 CPU(s):                       4-7
+Vulnerability Gather data sampling:      Not affected
+Vulnerability Ghostwrite:                Not affected
+Vulnerability Indirect target selection: Not affected
+Vulnerability Itlb multihit:             Not affected
+Vulnerability L1tf:                      Not affected
+Vulnerability Mds:                       Not affected
+Vulnerability Meltdown:                  Not affected
+Vulnerability Mmio stale data:           Not affected
+Vulnerability Old microcode:             Not affected
+Vulnerability Reg file data sampling:    Not affected
+Vulnerability Retbleed:                  Not affected
+Vulnerability Spec rstack overflow:      Not affected
+Vulnerability Spec store bypass:         Vulnerable
+Vulnerability Spectre v1:                Mitigation; __user pointer sanitization
+Vulnerability Spectre v2:                Mitigation; CSV2, but not BHB
+Vulnerability Srbds:                     Not affected
+Vulnerability Tsa:                       Not affected
+Vulnerability Tsx async abort:           Not affected
+Vulnerability Vmscape:                   Not affected
+CPU NODE
+  0    0
+  1    0
+  2    0
+  3    0
+  4    1
+  5    1
+  6    1
+  7    1
+available: 2 nodes (0-1)
+node 0 cpus: 0 1 2 3
+node 0 size: 3449 MB
+node 0 free: 3080 MB
+node 1 cpus: 4 5 6 7
+node 1 size: 3959 MB
+node 1 free: 3469 MB
+node distances:
+node     0    1 
+   0:   10   20 
+   1:   20   10 
+               total        used        free      shared  buff/cache   available
+Mem:           7.2Gi       587Mi       6.4Gi       1.1Mi       475Mi       6.7Gi
+Swap:          4.0Gi          0B       4.0Gi
+Filesystem                         Size  Used Avail Use% Mounted on
+/dev/mapper/ubuntu--vg-ubuntu--lv   76G   15G   58G  21% /
+0-1
+=== /sys/devices/system/node/node0 ===
+0-3
+10 20
+Node 0 MemTotal:        3532200 kB
+Node 0 MemFree:         3152260 kB
+Node 0 MemUsed:          379940 kB
+Node 0 SwapCached:            0 kB
+Node 0 Active:           228728 kB
+Node 0 Inactive:          51660 kB
+Node 0 Active(anon):     128884 kB
+Node 0 Inactive(anon):        0 kB
+Node 0 Active(file):      99844 kB
+Node 0 Inactive(file):    51660 kB
+Node 0 Unevictable:       12564 kB
+Node 0 Mlocked:           12564 kB
+Node 0 Dirty:                 4 kB
+Node 0 Writeback:             0 kB
+Node 0 FilePages:        154576 kB
+Node 0 Mapped:            49640 kB
+Node 0 AnonPages:        110668 kB
+Node 0 Shmem:               580 kB
+Node 0 KernelStack:        2352 kB
+Node 0 ShadowCallStack:     624 kB
+Node 0 PageTables:         2152 kB
+Node 0 SecPageTables:         0 kB
+Node 0 NFS_Unstable:          0 kB
+Node 0 Bounce:                0 kB
+Node 0 WritebackTmp:          0 kB
+Node 0 KReclaimable:      13932 kB
+Node 0 Slab:              49436 kB
+Node 0 SReclaimable:      13932 kB
+Node 0 SUnreclaim:        35504 kB
+Node 0 AnonHugePages:     63488 kB
+Node 0 ShmemHugePages:        0 kB
+Node 0 ShmemPmdMapped:        0 kB
+Node 0 FileHugePages:         0 kB
+Node 0 FilePmdMapped:         0 kB
+Node 0 HugePages_Total:     0
+Node 0 HugePages_Free:      0
+Node 0 HugePages_Surp:      0
+=== /sys/devices/system/node/node1 ===
+4-7
+20 10
+Node 1 MemTotal:        4054908 kB
+Node 1 MemFree:         3552200 kB
+Node 1 MemUsed:          502708 kB
+Node 1 SwapCached:            0 kB
+Node 1 Active:           359716 kB
+Node 1 Inactive:          29004 kB
+Node 1 Active(anon):      82172 kB
+Node 1 Inactive(anon):        0 kB
+Node 1 Active(file):     277544 kB
+Node 1 Inactive(file):    29004 kB
+Node 1 Unevictable:        6112 kB
+Node 1 Mlocked:            6112 kB
+Node 1 Dirty:                 0 kB
+Node 1 Writeback:             0 kB
+Node 1 FilePages:        311144 kB
+Node 1 Mapped:            73860 kB
+Node 1 AnonPages:         83640 kB
+Node 1 Shmem:               568 kB
+Node 1 KernelStack:        1236 kB
+Node 1 ShadowCallStack:     304 kB
+Node 1 PageTables:         1776 kB
+Node 1 SecPageTables:         0 kB
+Node 1 NFS_Unstable:          0 kB
+Node 1 Bounce:                0 kB
+Node 1 WritebackTmp:          0 kB
+Node 1 KReclaimable:       7388 kB
+Node 1 Slab:              33784 kB
+Node 1 SReclaimable:       7388 kB
+Node 1 SUnreclaim:        26396 kB
+Node 1 AnonHugePages:     49152 kB
+Node 1 ShmemHugePages:        0 kB
+Node 1 ShmemPmdMapped:        0 kB
+Node 1 FileHugePages:     12288 kB
+Node 1 FilePmdMapped:         0 kB
+Node 1 HugePages_Total:     0
+Node 1 HugePages_Free:      0
+Node 1 HugePages_Surp:      0

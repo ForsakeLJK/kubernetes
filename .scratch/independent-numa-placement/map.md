@@ -1,6 +1,6 @@
 # Independent CPU and memory NUMA placement design
 
-Status: design and ticket breakdown approved on 2026-10-14; 11 tickets published. Tickets 01 through 10 are resolved; the software/tooling milestone is delivered. Ticket 11 owns operator runtime evidence.
+Status: design and ticket breakdown approved on 2026-10-14; 11 tickets published. Tickets 01 through 10 are resolved; the software/tooling milestone is delivered. Ticket 11 is claimed: earlier runtime evidence is partial; STREAM VM smoke passed with raw artifact review on 2026-10-21. Qualified bandwidth and real DDR/HBM remain untested.
 
 Review: [specification](spec.md), [implementation plan](implementation-plan.md),
 and [validation plan](validation-plan.md).
@@ -16,6 +16,41 @@ single shared CPU/memory target and required single-numa-node alignment conflict
 with the new split-target use case and need an explicit design revision.
 
 ## Decisions-so-far
+
+- 2026-10-21: STREAM VM smoke verified from the copied raw archive: 36/36
+  executions pass, all 2,424 listed hashes match, and recomputation reproduces
+  PASS_SMOKE. Every array's 1,954 base pages was queried before timing and
+  matched the requested guest node. Cache sizes remain unknown; no qualified
+  bandwidth or DDR/HBM claim. Earlier matrix/raw-review gaps remain open.
+  See [reviewed evidence](runtime/evidence/2026-10-21/README.md).
+
+
+- Post-milestone review corrections recorded on 2026-10-19: a two-axis review
+  of `numa_support...HEAD` found five Spec deviations, now fixed with
+  red/green tests. Ranking checks only relevant distance columns.
+  `prefer-closest-numa-nodes` keeps its startup refusal under independent-numa.
+  Reserved-only CPU targets get a CPU-target error. Alignment ignores completed
+  init containers. NUMA field errors are ordered. The Standards finding on
+  actionable errors is also fixed: refusals name `cpuNUMA`/`memNUMA` and
+  "automatic" instead of printing node -1. Scope-creep and the other Standards
+  findings remain open. See
+  [verification-review-corrections.md](verification-review-corrections.md).
+
+- Ticket 11 progress recorded on 2026-10-19: the user operated an ARM64 QEMU/HVF
+  Ubuntu VM from commit `b76f73a6f478ef3ed63cdf58bcb295dfcec1013b`.
+  Reported passes cover single-container split/partial masks and restarts,
+  explicit CPU shortage/retry, 15 Pod-wide mask checks, a 102-check
+  compatibility/API batch, seven private-anonymous residency cases and 22
+  kubelet recovery checks. These counts have different scopes and do not
+  establish completion of all 34 acceptance categories. Memory checkpoint
+  cleanup was observed on the next admission after an idle-wait timeout.
+  STREAM setup encountered an API timeout after the original cluster terminal
+  was reportedly closed; control-plane recovery is unverified. The user
+  explicitly deferred STREAM; no bandwidth measurement exists. Ticket 11 stays
+  open for raw artifact review, remaining variants and STREAM. See
+  [verification-11.md](verification-11.md), the
+  [evidence snapshot](runtime/evidence/2026-10-19/README.md) and
+  [ticket progress](issues/11-record-manual-runtime-evidence.md#progress-recorded-2026-10-19).
 
 - Ticket 10 resolved on 2026-10-15: paired STREAM automation provides explicit
   manifests, sequential alternating warm-up/repeated thread sweeps, actual CPU/
@@ -188,7 +223,8 @@ No parent issue was closed or modified.
 | [10: Automate paired STREAM evaluation and evidence reporting](issues/10-automate-paired-stream-evaluation.md) | 08, 09 | ready-for-agent |
 | [11: Record user-operated VM or hardware acceptance evidence](issues/11-record-manual-runtime-evidence.md) | 10 | ready-for-agent |
 
-Current frontier after ticket 10: **11** (user-operated runtime evidence).
+Current frontier after ticket 10: **11**, claimed (partial VM results recorded;
+STREAM deferred by the user on 2026-10-19).
 
 Initial frontier: **01 and 08**. A ready-for-agent status means the ticket is
 prepared, not that its dependencies are resolved. Claim only a ticket whose
@@ -223,8 +259,18 @@ it does not block declaring the software/tooling milestone ready.
 ## Fog
 
 - No unresolved design or ticket-breakdown approval. The user approved the policy name `independent-numa`, specification, and published breakdown.
-- Runtime execution requires the user-selected environment; ticket 11 is a separate milestone.
+- A user-selected QEMU VM has supplied partial live runtime results; ticket 11
+  remains a separate, incomplete milestone. Raw VM archives and effective
+  configuration still need review; several outcomes were supplied as summaries.
 - Supervisor confirmation of the contradictory sentence is an external follow-up;
   the user selected support for both fields together in Q1.
-- Runtime validation may be manual in a VM or on team-provided hardware, with
-  claims limited to the environment actually used. No new runtime results are claimed.
+- Newly reported runtime results are limited to the VM and tested subcases in
+  verification-11.md. Untested matrix variants, STREAM, and real DDR/HBM
+  evaluation remain outstanding. The original cluster terminal was reportedly
+  closed; service state and control-plane recovery are not verified.
+
+## Remaining ticket 11 acceptance (2026-10-21)
+
+See [34-category disposition](remaining-acceptance-11.md). Historical raw batches
+await import; remaining cases require VM work or appropriate separate setups.
+No new deferrals or full-matrix PASS are asserted.

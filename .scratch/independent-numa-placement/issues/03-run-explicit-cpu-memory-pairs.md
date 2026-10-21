@@ -47,3 +47,13 @@ validation. The full suite reports 145 failures in 11 previously recorded
 package groups; every failure name occurs in ticket 01 or 02. Ancillary suites
 pass. No Linux VM/hardware runtime execution is claimed.
 See [verification-03.md](../verification-03.md) for evidence and limitations.
+
+## Post-resolution correction (2026-10-19)
+
+A post-milestone Spec review found two gaps against this ticket's contract.
+"A CPU target must contain eligible CPUs" was enforced only as "has CPU
+threads": a target whose CPUs were all reserved reached a generic shortage
+error. CPU Manager now refuses it with a CPU-target error that names the
+reserved CPUs. API range and Windows errors for `numaNode`, `cpuNUMA` and
+`memNUMA` were emitted in Go map order; they are now emitted in field order.
+See [verification-review-corrections.md](../verification-review-corrections.md).

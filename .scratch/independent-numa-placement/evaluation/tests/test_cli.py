@@ -115,6 +115,66 @@ class EvaluationCLI(unittest.TestCase):
             (directory / "pod/stdout.txt").write_text(json.dumps(pod))
         return plan
 
+    def test_collector_continues_when_guest_cache_size_is_missing(self):
+        import ast
+        tree = ast.parse((ROOT / 'paired.py').read_text())
+        collector = next(ast.literal_eval(n.value) for n in tree.body
+                         if isinstance(n, ast.Assign)
+                         and any(isinstance(t, ast.Name) and t.id == 'COLLECTOR' for t in n.targets))
+        evidence = self.base / 'collector-evidence'
+        evidence.mkdir()
+        cache = self.base / 'sys/cpu/cpu1/cache/index2'
+        cache.mkdir(parents=True)
+        (cache / 'level').write_text('2')
+        (cache / 'type').write_text('Unified')
+        (cache / 'shared_cpu_list').write_text('0-7')
+        node = self.base / 'sys/node/node0'
+        node.mkdir(parents=True)
+        (node / 'cpulist').write_text('0-3')
+        proc = self.base / 'proc-status'
+        proc.write_text('Cpus_allowed_list: 1\nMems_allowed_list: 0\n')
+        collector = collector.replace("pathlib.Path('/evidence')", 'pathlib.Path(' + repr(str(evidence)) + ')')
+        collector = collector.replace('/sys/devices/system', str(self.base / 'sys'))
+        collector = collector.replace('/proc/self/status', str(proc))
+        collector = collector.replace("__import__('os').sched_getaffinity(0)", '{1}')
+        collector = collector.replace('while True: time.sleep(60)', '')
+        result = subprocess.run([sys.executable, '-c', collector,
+                                 json.dumps({'cpu_node':0, 'argv':[sys.executable, '-c', 'pass']})],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        host = json.loads((evidence / 'host.json').read_text())
+        self.assertIsNone(host['llc_bytes'])
+        self.assertTrue(host['cache_errors'])
+        self.assertEqual(json.loads((evidence / 'execution.json').read_text())['returncode'], 0)
+
+    def test_unknown_cache_smoke_preserves_unknown_without_bandwidth_claim(self):
+        c = config()
+        c.update(mode='smoke', llc_bytes=None)
+        plan = self.evidence(c)
+        for row in plan['executions']:
+            host = self.output / 'executions' / row['id'] / 'workload/host.json'
+            host.write_text(json.dumps({'llc_bytes':None, 'cache_errors':[
+                {'cpu':4, 'error':'cache size unavailable'}]}))
+            pod = json.loads((self.output / row['manifest']).read_text())
+            collector_config = json.loads(pod['spec']['containers'][0]['command'][-1])
+            self.assertNotIn('--llc-bytes', collector_config['argv'])
+        result = self.cli('report', '--output', self.output)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        report = json.loads((self.output / 'report.json').read_text())
+        self.assertEqual(report['status'], 'PASS_FIXTURE')
+        self.assertFalse(report['successful_controlled_comparison'])
+
+    def test_unknown_cache_rejected_for_bandwidth(self):
+        c = config()
+        c['llc_bytes'] = None
+        self.assertNotEqual(self.prepare(c).returncode, 0)
+
+    def test_missing_observed_cache_rejected_for_bandwidth(self):
+        plan = self.evidence()
+        host = self.output / 'executions' / plan['executions'][0]['id'] / 'workload/host.json'
+        host.write_text(json.dumps({'llc_bytes':None, 'cache_errors':['missing size']}))
+        self.assertNotEqual(self.cli('report', '--output', self.output).returncode, 0)
+
     def test_report_keeps_fixture_rates_and_never_claims_live_comparison(self):
         self.evidence()
         result = self.cli("report", "--output", self.output)

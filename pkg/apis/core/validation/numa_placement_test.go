@@ -230,3 +230,33 @@ func TestPodIndependentNUMAWholeCPUFormats(t *testing.T) {
 		})
 	}
 }
+
+func TestPodNUMAPlacementErrorOrder(t *testing.T) {
+	pod := numaValidationPod(ptr.To[int32](-1))
+	pod.Spec.CPUNUMA, pod.Spec.MemNUMA = ptr.To[int32](64), ptr.To[int32](-1)
+	want := []string{"spec.numaNode", "spec.cpuNUMA", "spec.memNUMA"}
+	// Map iteration would pass occasionally, so repeat enough to expose it.
+	for range 20 {
+		var got []string
+		for _, err := range ValidatePodSpec(&pod.Spec, &pod.ObjectMeta, field.NewPath("spec"), PodValidationOptions{}) {
+			if err.Type == field.ErrorTypeInvalid {
+				got = append(got, err.Field)
+			}
+		}
+		if fmt.Sprint(got) != fmt.Sprint(want) {
+			t.Fatalf("range errors = %v, want %v", got, want)
+		}
+	}
+	pod.Spec.OS = &core.PodOS{Name: core.Windows}
+	for range 20 {
+		var got []string
+		for _, err := range ValidatePodSpec(&pod.Spec, &pod.ObjectMeta, field.NewPath("spec"), PodValidationOptions{}) {
+			if err.Type == field.ErrorTypeForbidden && strings.HasSuffix(err.Detail, "requires a Linux Pod") {
+				got = append(got, err.Field)
+			}
+		}
+		if fmt.Sprint(got) != fmt.Sprint(want) {
+			t.Fatalf("Windows errors = %v, want %v", got, want)
+		}
+	}
+}

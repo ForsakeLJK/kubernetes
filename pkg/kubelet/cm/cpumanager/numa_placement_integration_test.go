@@ -371,3 +371,31 @@ func TestNUMAPlacementRollbackPreservesOtherPodCPUs(t *testing.T) {
 		t.Fatalf("default CPU set = %s, want other pod CPU retained", state.GetDefaultCPUSet())
 	}
 }
+
+func TestIndependentNUMACPUTargetRequiresEligibleCPUs(t *testing.T) {
+	logger, _ := ktesting.NewTestContext(t)
+	for _, tc := range []struct {
+		name     string
+		target   int32
+		reserved cpuset.CPUSet
+		want     string
+	}{
+		{name: "allocatable CPUs remain", target: 1, reserved: cpuset.New(0)},
+		{name: "every target CPU reserved", target: 1, reserved: topoDualSocketHT.CPUDetails.CPUsInNUMANodes(1), want: "reserved for system use"},
+		{name: "target without CPUs", target: 5, reserved: cpuset.New(0), want: "contains no eligible CPUs"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			policy, err := NewStaticPolicy(logger, topoDualSocketHT, tc.reserved.Size(), tc.reserved, nil, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			pod := makePod("cpu-target", "app", "1000m", "1000m")
+			pod.Spec.CPUNUMA = &tc.target
+			m := &manager{policy: policy, state: &mockState{}, topology: topoDualSocketHT}
+			err = m.CheckNUMAPlacement(pod, &pod.Spec.Containers[0])
+			if tc.want == "" && err != nil || tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)) {
+				t.Fatalf("CPU target check = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}

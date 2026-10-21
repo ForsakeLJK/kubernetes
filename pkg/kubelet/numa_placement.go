@@ -45,10 +45,6 @@ func (h *numaPlacementAdmitHandler) Admit(_ context.Context, attrs *lifecycle.Po
 	if err := topologymanager.ValidateIndependentNUMARequest(attrs.Pod); err != nil {
 		return lifecycle.PodAdmitResult{Reason: "NUMAPlacementUnsupported", Message: err.Error()}
 	}
-	id := placement.CPU
-	if id == -1 {
-		id = placement.Memory
-	}
 	policySupported := h.config.TopologyManagerPolicy == topologymanager.PolicySingleNumaNode || h.config.TopologyManagerPolicy == topologymanager.PolicyIndependentNUMA
 	policyNames := "single-numa-node or independent-numa"
 	if placement.Independent {
@@ -59,20 +55,20 @@ func (h *numaPlacementAdmitHandler) Admit(_ context.Context, attrs *lifecycle.Po
 		!policySupported || h.config.TopologyManagerScope != "pod" {
 		return lifecycle.PodAdmitResult{
 			Reason:  "NUMAPlacementUnsupported",
-			Message: fmt.Sprintf("NUMA node %d requires Linux, CPU Manager static, Memory Manager Static, and Topology Manager %s with pod scope", id, policyNames),
+			Message: fmt.Sprintf("%s requires Linux, CPU Manager static, Memory Manager Static, and Topology Manager %s with pod scope", placement, policyNames),
 		}
 	}
 	info, err := h.getMachineInfo()
 	if err != nil {
 		return lifecycle.PodAdmitResult{
 			Reason:  "NUMAPlacementUnsupported",
-			Message: fmt.Sprintf("cannot verify NUMA node %d against local machine topology: %v", id, err),
+			Message: fmt.Sprintf("cannot verify %s against local machine topology: %v", placement, err),
 		}
 	}
 	if info == nil {
 		return lifecycle.PodAdmitResult{
 			Reason:  "NUMAPlacementUnsupported",
-			Message: fmt.Sprintf("cannot verify NUMA node %d: local machine topology information is unavailable", id),
+			Message: fmt.Sprintf("cannot verify %s: local machine topology information is unavailable", placement),
 		}
 	}
 	for _, target := range []struct {

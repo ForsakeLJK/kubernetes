@@ -1,0 +1,17 @@
+{
+  "review_date": "2026-10-21",
+  "archive": "/Users/jukeliu/ra_workspace/numa_support_kubernetes/stream-smoke.nnftze4f",
+  "report_sha256": "0cada589a391a45c121ba4f58146e31a2803bdccb1f6af558e08424c9845d7f6",
+  "artifact_hashes_checked": 2424,
+  "artifact_hash_failures": 0,
+  "recomputed_report_equals_original": true,
+  "status": "PASS_SMOKE",
+  "executions_passed": 36,
+  "array_records_checked": 108,
+  "base_page_bytes": 4096,
+  "pages_per_array": 1954,
+  "queried_pages_per_array": 1954,
+  "all_queried_nodes_match_target": true,
+  "archive_and_delete_commands_successful": 36,
+  "scope": "Guest page locations at initialized_before_calibration; no continuous residency or qualified bandwidth claim."
+}

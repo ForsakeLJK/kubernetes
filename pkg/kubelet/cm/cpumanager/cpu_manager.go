@@ -320,6 +320,18 @@ func (m *manager) checkNUMAPlacement(pod *v1.Pod, container *v1.Container) error
 		return nil
 	}
 	if placement.Independent {
+		if placement.CPU != -1 {
+			// The kubelet admit handler only sees machine topology. Reserved CPUs
+			// are known here, so a reserved-only target fails with its own error
+			// instead of a generic shortage.
+			nodeCPUs := m.topology.CPUDetails.CPUsInNUMANodes(placement.CPU)
+			if nodeCPUs.IsEmpty() {
+				return fmt.Errorf("CPU NUMA node %d contains no eligible CPUs", placement.CPU)
+			}
+			if policy, ok := m.policy.(*staticPolicy); ok && policy.GetAllocatableCPUs(m.state).Intersection(nodeCPUs).IsEmpty() {
+				return fmt.Errorf("CPU NUMA node %d contains no eligible CPUs: all of %s are reserved for system use", placement.CPU, nodeCPUs)
+			}
+		}
 		if err := topologymanager.CheckPodNUMANodes(pod, "CPU", placement.CPU, func(c *v1.Container) sets.Set[int] {
 			return m.GetAssignedCPUNUMANodes(string(pod.UID), c.Name)
 		}); err != nil {
@@ -443,7 +455,7 @@ func (m *manager) ValidateNUMAPlacement(pod *v1.Pod, container *v1.Container) er
 	defer m.Unlock()
 	_, exists := m.state.GetCPUSet(string(pod.UID), container.Name)
 	if !exists {
-		return fmt.Errorf("CPU allocation for requested NUMA node %d is missing", placement.CPU)
+		return fmt.Errorf("CPU allocation for %s is missing for container %s; the Pod must be re-admitted", placement.CPUTarget(), container.Name)
 	}
 	return m.checkNUMAPlacement(pod, container)
 }

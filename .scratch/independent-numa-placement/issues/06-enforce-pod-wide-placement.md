@@ -51,3 +51,11 @@ reviews report zero remaining findings. The full suite reports 162,408 tests,
 ticket 05. Ancillary suites pass. See
 [verification-06.md](../verification-06.md) for commands, review fixes, evidence,
 and limits. No Linux VM/hardware runtime or performance result is claimed.
+
+## Post-resolution correction (2026-10-19)
+
+A post-milestone Spec review found that common-node alignment was under-counted
+for recovered Pods with completed sequential init containers. Recovery skips
+their released assignments, so they reported the shared CPU pool. The alignment
+check now skips the same completed init containers that admission skips. See
+[verification-review-corrections.md](../verification-review-corrections.md).

@@ -43,6 +43,12 @@ per-node available capacities. Establish those capacities from actual topology,
 reservations and current load. Planned capacities reserve no resources;
 kubelet admission and OOM evidence remain authoritative.
 
+For a VM that does not expose cache sizes, use `mode: "smoke"` and
+`llc_bytes: null`. The collector retains cache-discovery errors and an unknown
+LLC value. This permits workflow and sampled-placement validation, never a
+qualified bandwidth comparison. Bandwidth mode still requires a positive
+cache budget and complete observed LLC evidence.
+
 Record `environment.interference`, `settings`, deployed `fork_commit`, and
 supporting topology/host/configuration files in `environment.files`. File paths
 are relative to the config file. Preparation copies them into the archive.

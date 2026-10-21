@@ -35,6 +35,35 @@ type NUMAPlacement struct {
 	Independent bool
 }
 
+// String names the Pod fields so a refusal points at what the user set.
+// Legacy Pods keep their established "NUMA node N" wording.
+func (p NUMAPlacement) String() string {
+	if !p.Independent {
+		return fmt.Sprintf("NUMA node %d", p.CPU)
+	}
+	return fmt.Sprintf("NUMA placement cpuNUMA=%s, memNUMA=%s", numaTargetValue(p.CPU), numaTargetValue(p.Memory))
+}
+
+// CPUTarget and MemoryTarget describe one side before automatic selection
+// resolves it, so an unresolved side never surfaces as node -1.
+func (p NUMAPlacement) CPUTarget() string { return numaTarget("CPU", p.CPU) }
+
+func (p NUMAPlacement) MemoryTarget() string { return numaTarget("memory", p.Memory) }
+
+func numaTarget(resource string, id int) string {
+	if id == -1 {
+		return "automatic " + resource + " NUMA placement"
+	}
+	return fmt.Sprintf("requested NUMA node %d", id)
+}
+
+func numaTargetValue(id int) string {
+	if id == -1 {
+		return "automatic"
+	}
+	return fmt.Sprint(id)
+}
+
 // CheckPodNUMANodes checks surviving assignments, including init allocations
 // whose resources have been reused. Missing assignments do not choose a target.
 func CheckPodNUMANodes(pod *v1.Pod, resource string, target int, assignedNodes func(*v1.Container) sets.Set[int]) error {
@@ -44,7 +73,7 @@ func CheckPodNUMANodes(pod *v1.Pod, resource string, target int, assignedNodes f
 			continue
 		}
 		if nodes.Len() != 1 || target != -1 && !nodes.Has(target) {
-			return fmt.Errorf("%s assignment conflicts with Pod-wide singleton NUMA placement (target %d): container %s uses nodes %v", resource, target, container.Name, sets.List(nodes))
+			return fmt.Errorf("%s assignment conflicts with Pod-wide singleton NUMA placement (target %s): container %s uses nodes %v", resource, numaTargetValue(target), container.Name, sets.List(nodes))
 		}
 		target = sets.List(nodes)[0]
 	}

@@ -362,10 +362,6 @@ grep -H Triad stream-remote.txt stream-local.txt
 kubectl delete pod stream-local
 ```
 
-On physical hardware with real NUMA, `stream-local` may show the higher Triad rate. To test HBM, set `memNUMA` to the HBM node and compare again. In a VM, both guest NUMA nodes may be backed by the same host memory, so the rates can be about equal even though placement is correct. In that case, rely on `numastat`, not bandwidth, to confirm placement. For a fair comparison, use the same CPU set, keep the host idle, and run each configuration several times.
-
-
-
 ## AI Usage Declaration
 
 GPT-6 Astra, GPT-6.1 Sol, and Claude Opus 5.5 were used to implement this feature.

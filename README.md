@@ -58,27 +58,6 @@ kubectl explain pod.spec.cpuNUMA
 kubectl explain pod.spec.memNUMA
 ```
 
-### 4. Start a single-node test cluster (optional)
-
-`hack/local-up-cluster.sh` reads the kubelet policy settings from environment variables. Run it on the Linux node, with etcd 3.7.1 or newer and containerd already installed:
-
-```bash
-export CPUMANAGER_POLICY=static
-export MEMORY_MANAGER_POLICY=Static
-export TOPOLOGY_MANAGER_POLICY=independent-numa
-export CGROUP_DRIVER=systemd
-export CONTAINER_RUNTIME_ENDPOINT=unix:///run/containerd/containerd.sock
-export KUBELET_FLAGS="--topology-manager-scope=pod --reserved-cpus=0,4 --system-reserved=cpu=1,memory=512Mi --kube-reserved=cpu=1,memory=1024Mi --reserved-memory=0:memory=818Mi;1:memory=818Mi"
-export EVICTION_HARD='memory.available<100Mi,nodefs.available<10%,nodefs.inodesFree<5%,imagefs.available<15%'
-
-sudo swapoff -a
-hack/install-etcd.sh                       # only if etcd is older than 3.7.1
-export PATH="$PWD/third_party/etcd:$PATH"
-hack/local-up-cluster.sh -o /path/to/numa-bin
-```
-
-The `--reserved-memory` total (818Mi + 818Mi = 1636Mi) has to equal system-reserved + kube-reserved + the memory eviction threshold (512 + 1024 + 100). Change these values to fit your machine. Leave this terminal open. The script prints the `KUBECONFIG` to export in a second terminal.
-
 ## How to Use
 
 This fork lets a Pod pin its CPUs to one NUMA node and its memory to a different one, using two Pod fields: `cpuNUMA` and `memNUMA`. The kubelet enforces both as hard requirements. If it can't satisfy them, it refuses the Pod; it never falls back to another node.
